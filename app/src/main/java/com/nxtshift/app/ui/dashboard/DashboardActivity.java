@@ -29,6 +29,7 @@ import com.nxtshift.app.ui.calendar.CalendarActivity;
 import com.nxtshift.app.ui.duty.EditDutyActivity;
 import com.nxtshift.app.ui.importroster.PublishedRosterImportActivity;
 import com.nxtshift.app.ui.importroster.RosterImportActivity;
+import com.nxtshift.app.excel.ExcelRosterImportActivity;
 import com.nxtshift.app.ui.settings.SettingsActivity;
 import com.nxtshift.app.util.DateTimeUtils;
 
@@ -122,6 +123,10 @@ public class DashboardActivity extends AppCompatActivity {
 
         binding.cardImportPublishedRoster.setOnClickListener(v -> {
             startActivity(new Intent(DashboardActivity.this, PublishedRosterImportActivity.class));
+        });
+
+        binding.cardImportExcelRoster.setOnClickListener(v -> {
+            startActivity(new Intent(DashboardActivity.this, ExcelRosterImportActivity.class));
         });
 
         binding.cardImportRoster.setOnClickListener(v -> {
