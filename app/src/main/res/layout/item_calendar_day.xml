@@ -5,7 +5,7 @@
     android:background="?attr/selectableItemBackground"
     android:clickable="true"
     android:focusable="true"
-    android:gravity="center"
+    android:gravity="center_horizontal"
     android:orientation="vertical"
     android:padding="2dp">
 
@@ -18,13 +18,35 @@
         android:textColor="@color/text_primary"
         android:textSize="13sp" />
 
-    <!-- Shift Indicator Dot -->
-    <View
-        android:id="@+id/viewShiftDot"
-        android:layout_width="6dp"
-        android:layout_height="6dp"
-        android:layout_marginTop="2dp"
-        android:background="@drawable/bg_badge_rounded"
-        android:backgroundTint="@color/shift_morning"
-        android:visibility="invisible" />
+    <!-- Indicator slot directly below date number -->
+    <FrameLayout
+        android:id="@+id/layoutIndicatorContainer"
+        android:layout_width="match_parent"
+        android:layout_height="14dp"
+        android:layout_marginTop="1dp">
+
+        <!-- Shift Indicator Dot for working shifts -->
+        <View
+            android:id="@+id/viewShiftDot"
+            android:layout_width="6dp"
+            android:layout_height="6dp"
+            android:layout_gravity="center"
+            android:background="@drawable/bg_badge_rounded"
+            android:backgroundTint="@color/shift_morning"
+            android:visibility="invisible" />
+
+        <!-- Leave Indicator: small red capital letter L directly below date number -->
+        <TextView
+            android:id="@+id/tvLeaveIndicator"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:fontFamily="sans-serif-bold"
+            android:includeFontPadding="false"
+            android:text="L"
+            android:textColor="@color/shift_off"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+    </FrameLayout>
 </LinearLayout>
