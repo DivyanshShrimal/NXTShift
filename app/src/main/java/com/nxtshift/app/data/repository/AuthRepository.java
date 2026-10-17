@@ -105,8 +105,11 @@ public class AuthRepository {
                     // Send verification link immediately after account creation
                     user.sendEmailVerification()
                             .addOnCompleteListener(task -> {
-                                // Proceed regardless of whether verification email sent
-                                Log.d(TAG, "Verification email sent to " + email);
+                                if (task.isSuccessful()) {
+                                    Log.d(TAG, "Initial verification email dispatched successfully to " + email);
+                                } else {
+                                    Log.w(TAG, "Initial verification email dispatch encountered an issue for " + email, task.getException());
+                                }
                                 callback.onSuccess(user);
                             });
                 })
@@ -166,8 +169,14 @@ public class AuthRepository {
             return;
         }
         user.sendEmailVerification()
-                .addOnSuccessListener(aVoid -> callback.onSuccess())
-                .addOnFailureListener(callback::onError);
+                .addOnSuccessListener(aVoid -> {
+                    Log.d(TAG, "Verification email resent successfully to " + user.getEmail());
+                    callback.onSuccess();
+                })
+                .addOnFailureListener(e -> {
+                    Log.w(TAG, "Resending verification email failed", e);
+                    callback.onError(e);
+                });
     }
 
     /**
