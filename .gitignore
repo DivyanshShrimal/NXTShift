@@ -1,0 +1,51 @@
+# Built and generated artifacts
+build/
+app/build/
+*/build/
+bin/
+gen/
+out/
+.gradle/
+*.apk
+*.ap_
+*.aab
+*.dex
+
+# Local machine configuration
+local.properties
+
+# Android Studio / IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+captures/
+.navigation/
+
+# Visual Studio Code
+.vscode/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Signing credentials and keystores
+*.jks
+*.keystore
+*.p12
+*.key
+*.pem
+signing.properties
+
+# Private credentials and secrets
+.env
+.env.*
+*service-account*.json
+*credentials*.json
+secrets.xml
+
+# Diagnostic and log files
+*.log
+nxtshift_crash_log.txt
+crash_log.txt

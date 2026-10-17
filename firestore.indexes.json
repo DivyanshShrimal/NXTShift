@@ -1,0 +1,22 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "duties",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "dutyDate", "order": "ASCENDING" },
+        { "fieldPath": "startTime", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "monthly_rosters",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "year", "order": "DESCENDING" },
+        { "fieldPath": "month", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

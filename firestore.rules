@@ -1,0 +1,129 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Helper Functions for Secure Authentication, Ownership, and Role Verification
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    // Checks that the incoming request is from a valid, authenticated Firebase user
+    function isAuthenticated() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    // Checks that the authenticated user owns the document path
+    function isOwner(uid) {
+      return isAuthenticated() && request.auth.uid == uid;
+    }
+
+    // Validates per-user duty schema and ownership
+    function isValidDutyData(data, uid) {
+      return data.ownerUid == uid
+          && data.id is string
+          && data.dutyDate is string
+          && data.shiftType is string
+          && data.status is string
+          && data.updatedAt is number;
+    }
+
+    // Role-based admin authorization check:
+    // Requires authenticated user and either a custom claim or entry in /admins collection.
+    // Client-side role claims or request data fields are NEVER trusted as the security boundary.
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.admin == true ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Validates central monthly roster schema, versioning, status constraints,
+    // and enforces that publishedByUid strictly matches the authenticated admin's UID.
+    function isValidMonthlyRoster(data, rosterId) {
+      return data.id == rosterId
+          && data.year is number && data.year >= 2020 && data.year <= 2100
+          && data.month is number && data.month >= 1 && data.month <= 12
+          && data.status in ['DRAFT', 'PUBLISHED']
+          && data.version is number && data.version >= 1
+          && data.updatedAt is number
+          && (data.status != 'PUBLISHED' || (data.publishedAt is number && data.publishedByUid == request.auth.uid));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 1. Admin Authorization Collection: /admins/{adminUid}
+    // ─────────────────────────────────────────────────────────────────────────────
+    // - Any authenticated user can get their own document to check if they are an admin.
+    // - Only admins can list the admin collection (prevents normal users from enumerating admin UIDs).
+    // - Writes are COMPLETELY DISABLED from all client apps (managed exclusively via Firebase Console or Admin SDK).
+    // - Clients can NEVER grant themselves or others administrator privileges.
+    match /admins/{adminUid} {
+      allow get: if isAuthenticated() && (request.auth.uid == adminUid || isAdmin());
+      allow list: if isAdmin();
+      allow write: if false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 2. Central Monthly Roster Collection: /monthly_rosters/{rosterId}
+    // ─────────────────────────────────────────────────────────────────────────────
+    // - Authenticated users can read published rosters or check non-existent documents without permission denial.
+    // - Authenticated users can list/query published rosters when filtering by status == 'PUBLISHED'.
+    // - Unpublished drafts are strictly inaccessible to normal users.
+    // - Only verified admins can read drafts, and create, update, publish, or delete central rosters.
+    match /monthly_rosters/{rosterId} {
+      allow get: if isAuthenticated() && (
+        resource == null || resource.data.status == 'PUBLISHED' || isAdmin()
+      );
+      allow list: if isAuthenticated() && (
+        resource.data.status == 'PUBLISHED' || isAdmin()
+      );
+      allow create, update: if isAdmin() && isValidMonthlyRoster(request.resource.data, rosterId);
+      allow delete: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 3. User Isolated Root Document & Profile: /users/{uid} (PRESERVED)
+    // ─────────────────────────────────────────────────────────────────────────────
+    match /users/{uid} {
+      allow read, write: if isOwner(uid);
+
+      // User Profile sub-document
+      match /profile/{profileDoc} {
+        allow read, write: if isOwner(uid);
+      }
+
+      // User Isolated Duties Collection
+      match /duties/{dutyId} {
+        allow read: if isOwner(uid);
+        allow create: if isOwner(uid) 
+                      && isValidDutyData(request.resource.data, uid)
+                      && request.resource.data.id == dutyId;
+        allow update: if isOwner(uid)
+                      && isValidDutyData(request.resource.data, uid)
+                      && request.resource.data.ownerUid == resource.data.ownerUid;
+        allow delete: if isOwner(uid);
+      }
+
+      // Roster Imports log
+      match /rosterImports/{importId} {
+        allow read, write: if isOwner(uid);
+      }
+
+      // User Staff Directory
+      match /staff/{staffId} {
+        allow read, write: if isOwner(uid);
+      }
+
+      // User Settings and Preferences
+      match /settings/{settingsDoc} {
+        allow read, write: if isOwner(uid);
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 4. Default Deny Catch-All (PRESERVED)
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Deny access by default to any other unmatched collection or document
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

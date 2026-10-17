@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Brand Primary Colors - Midnight Navy -->
+    <color name="brand_primary">#0F172A</color>
+    <color name="brand_primary_variant">#1E293B</color>
+    <color name="brand_surface_dark">#0B1120</color>
+
+    <!-- Brand Accent Colors - Mint Green -->
+    <color name="brand_accent">#10B981</color>
+    <color name="brand_accent_variant">#059669</color>
+    <color name="brand_accent_light">#D1FAE5</color>
+    <color name="brand_accent_glow">#34D399</color>
+
+    <!-- Backgrounds & Neutrals -->
+    <color name="bg_light">#F8FAFC</color>
+    <color name="bg_card">#FFFFFF</color>
+    <color name="bg_input">#FFFFFF</color>
+    <color name="border_light">#CBD5E1</color>
+    <color name="border_focus">#10B981</color>
+
+    <!-- Text Colors -->
+    <color name="text_primary">#0F172A</color>
+    <color name="text_secondary">#475569</color>
+    <color name="text_muted">#64748B</color>
+    <color name="text_on_dark">#FFFFFF</color>
+    <color name="text_on_dark_secondary">#94A3B8</color>
+
+    <!-- Shift Type Colors -->
+    <!-- Morning (Golden/Amber) -->
+    <color name="shift_morning">#D97706</color>
+    <color name="shift_morning_bg">#FEF3C7</color>
+    <color name="shift_morning_text">#92400E</color>
+
+    <!-- Evening (Indigo/Blue) -->
+    <color name="shift_evening">#4F46E5</color>
+    <color name="shift_evening_bg">#EEF2FF</color>
+    <color name="shift_evening_text">#3730A3</color>
+
+    <!-- Night (Dark Black/Navy with high-contrast text) -->
+    <color name="shift_night">#0B1120</color>
+    <color name="shift_night_bg">#0B1120</color>
+    <color name="shift_night_text">#FFFFFF</color>
+
+    <!-- General / Day (Mint/Teal) -->
+    <color name="shift_general">#059669</color>
+    <color name="shift_general_bg">#D1FAE5</color>
+    <color name="shift_general_text">#065F46</color>
+
+    <!-- Off / Leave (Rose/Red) -->
+    <color name="shift_off">#DC2626</color>
+    <color name="shift_off_bg">#FEE2E2</color>
+    <color name="shift_off_text">#991B1B</color>
+
+    <!-- Status Badges -->
+    <color name="status_synced">#10B981</color>
+    <color name="status_pending">#F59E0B</color>
+    <color name="status_error">#EF4444</color>
+
+    <!-- Transparent / Overlay -->
+    <color name="scrim">#80000000</color>
+    <color name="transparent">#00000000</color>
+</resources>

@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NXTShift</string>
+    <string name="app_tagline">Always one shift ahead.</string>
+
+    <!-- Welcome Screen -->
+    <string name="welcome_heading">Smarter Rosters for Healthcare Heroes</string>
+    <string name="welcome_subheading">Effortless duty scheduling, instant on-device OCR roster import, and automated shift alerts tailored for nurses.</string>
+    <string name="btn_get_started">Get Started</string>
+    <string name="btn_continue">Continue</string>
+    <string name="welcome_privacy_note">By continuing, you agree to our Terms and Privacy Policy. Your data is isolated to your private account.</string>
+
+    <!-- Auth Common -->
+    <string name="btn_back">Back</string>
+    <string name="err_generic_auth">Authentication failed. Please try again.</string>
+    <string name="err_invalid_email">Please enter a valid email address.</string>
+    <string name="err_password_required">Please enter your password.</string>
+    <string name="err_password_too_short">Password must be at least 6 characters.</string>
+    <string name="err_passwords_do_not_match">Passwords do not match.</string>
+
+    <!-- Login Screen -->
+    <string name="login_title">Sign in to your account</string>
+    <string name="hint_email">Email address</string>
+    <string name="hint_password">Password</string>
+    <string name="btn_sign_in">Sign In</string>
+    <string name="btn_forgot_password">Forgot password?</string>
+    <string name="msg_no_account">Don\'t have an account? Create one</string>
+
+    <!-- Registration Screen -->
+    <string name="register_title">Create your account</string>
+    <string name="hint_confirm_password">Confirm password</string>
+    <string name="hint_password_requirement">Minimum 6 characters</string>
+    <string name="btn_create_account">Create Account</string>
+    <string name="msg_already_have_account">Already have an account? Sign in</string>
+
+    <!-- Forgot Password Screen -->
+    <string name="forgot_password_title">Forgot Password?</string>
+    <string name="forgot_password_desc">Enter your registered email address and we\'ll send you a link to reset your password.</string>
+    <string name="btn_send_reset">Send Reset Link</string>
+    <string name="msg_reset_email_sent">A password reset link has been sent to %1$s. Please check your inbox and spam folder.</string>
+
+    <!-- Email Verification Screen -->
+    <string name="verify_email_title">Verify Your Email</string>
+    <string name="msg_verification_sent_to">A verification link has been sent to:\n%1$s</string>
+    <string name="verify_email_instructions">Open the email and tap the link to verify your account, then return here and tap the button below.</string>
+    <string name="btn_ive_verified">I\'ve Verified — Continue</string>
+    <string name="btn_resend_verification">Resend Verification Email</string>
+    <string name="resend_countdown">Resend in %1$ds</string>
+    <string name="msg_email_not_yet_verified">Email not yet verified. Please check your inbox and tap the verification link, then try again.</string>
+    <string name="msg_verification_resent">Verification email resent. Please check your inbox.</string>
+    <string name="err_resend_failed">Could not resend: %1$s</string>
+    <string name="msg_cancel_and_sign_out">Cancel registration and sign out</string>
+
+    <!-- Dashboard -->
+    <string name="dashboard_title">Dashboard</string>
+    <string name="dashboard_greeting">Duty Roster</string>
+    <string name="label_today_shift">Today\'s Shift</string>
+    <string name="label_tomorrow_shift">Tomorrow\'s Shift</string>
+    <string name="label_next_upcoming">Next Duty</string>
+    <string name="label_colleagues">Colleagues on duty</string>
+    <string name="label_ward">Ward / Department</string>
+    <string name="label_notes">Notes</string>
+    <string name="status_off">Weekly Off</string>
+    <string name="status_leave">On Leave</string>
+    <string name="status_no_duty">No shift scheduled</string>
+    <string name="status_unknown_roster">Roster not yet loaded for this date</string>
+    <string name="btn_import_roster">Import Screenshot</string>
+    <string name="btn_add_duty">Add Duty</string>
+    <string name="btn_view_calendar">Calendar</string>
+    <string name="btn_settings">Settings</string>
+
+    <!-- Shifts -->
+    <string name="shift_morning">Morning</string>
+    <string name="shift_evening">Evening</string>
+    <string name="shift_night">Night</string>
+    <string name="shift_general">General</string>
+    <string name="shift_off_day">Day Off</string>
+    <string name="shift_on_leave">Leave</string>
+
+    <!-- Duty Management -->
+    <string name="title_add_duty">Schedule Duty</string>
+    <string name="title_edit_duty">Edit Duty</string>
+    <string name="hint_date">Duty Date (YYYY-MM-DD)</string>
+    <string name="hint_shift_type">Shift Type</string>
+    <string name="hint_start_time">Start Time (e.g. 07:00 AM)</string>
+    <string name="hint_end_time">End Time (e.g. 02:00 PM)</string>
+    <string name="label_overnight_shift">Ends next day (Overnight shift)</string>
+    <string name="hint_colleagues">Colleagues (e.g. Nurse Priya, Staff Nurse Rahul)</string>
+    <string name="hint_ward">Ward / Unit (e.g. ICU, Emergency, Ward 4B)</string>
+    <string name="hint_notes">Additional notes</string>
+    <string name="btn_save_duty">Save Duty</string>
+    <string name="btn_delete_duty">Delete</string>
+    <string name="confirm_delete_duty_title">Delete Duty Record?</string>
+    <string name="confirm_delete_duty_message">This duty record will be permanently deleted from your local cache and cloud backup.</string>
+
+    <!-- OCR Roster Import -->
+    <string name="title_import_roster">Import Roster Screenshot</string>
+    <string name="desc_import_roster">Select an image of your hospital roster from your gallery or camera. All processing runs entirely on your device with Google ML Kit.</string>
+    <string name="btn_choose_photo">Select Screenshot</string>
+    <string name="ocr_processing_title">Analyzing Roster...</string>
+    <string name="ocr_processing_desc">Reading dates, shift codes, and ward details on-device.</string>
+    <string name="ocr_review_title">Review Extracted Shifts</string>
+    <string name="ocr_review_desc">Verify each recognized shift before saving to your personal schedule.</string>
+    <string name="ocr_no_shifts_found">No clear shift records could be recognized. You can enter your duties manually or try another clearer photo.</string>
+    <string name="btn_save_imported_shifts">Save to My Roster</string>
+    <string name="label_duplicate_detected">Matches existing date: %1$s</string>
+    <string name="opt_merge_keep_new">Replace existing with new import</string>
+    <string name="opt_merge_keep_old">Keep existing shift</string>
+
+    <!-- Calendar -->
+    <string name="title_calendar">Monthly Roster</string>
+    <string name="empty_calendar_day">No shifts scheduled for this day</string>
+
+    <!-- Settings -->
+    <string name="title_settings">Settings &amp; Account</string>
+    <string name="pref_category_reminders">Shift Reminders</string>
+    <string name="pref_enable_reminder">Daily shift alert</string>
+    <string name="pref_enable_reminder_summary">Receive a local notification about tomorrow\'s duty schedule</string>
+    <string name="pref_reminder_time">Reminder time</string>
+    <string name="pref_reminder_time_default">8:00 PM</string>
+    <string name="pref_persistent_notif">Ongoing next-duty notification</string>
+    <string name="pref_persistent_notif_summary">Show your current or upcoming shift in notification center</string>
+    <string name="pref_lockscreen_privacy">Hide details on lock screen</string>
+    <string name="pref_lockscreen_privacy_summary">Protect patient ward or colleague privacy when device is locked</string>
+
+    <string name="pref_category_account">Account &amp; Sync</string>
+    <string name="pref_user_id">User UID</string>
+    <string name="pref_user_email">Registered Email</string>
+    <string name="pref_sync_status">Cloud Synchronization</string>
+    <string name="btn_manual_sync">Sync Now</string>
+    <string name="btn_sign_out">Sign Out</string>
+    <string name="btn_delete_account">Delete Account &amp; Remote Data</string>
+    <string name="pref_category_about">About &amp; Privacy</string>
+    <string name="pref_privacy_policy">Privacy Policy</string>
+    <string name="pref_app_version">Version 1.0.0 (Production-Oriented)</string>
+
+    <!-- Dialogs -->
+    <string name="confirm_sign_out_title">Sign Out?</string>
+    <string name="confirm_sign_out_message">Your local cache will be cleared from this device. Your data remains safely backed up in Cloud Firestore.</string>
+    <string name="confirm_delete_account_title">Delete Account?</string>
+    <string name="confirm_delete_account_message">This action cannot be undone. All your duty records in Firestore, preferences, and account credentials will be permanently erased.</string>
+    <string name="dialog_cancel">Cancel</string>
+    <string name="dialog_confirm">Confirm</string>
+
+    <!-- Notification Strings -->
+    <string name="notification_channel_name">Shift Reminders</string>
+    <string name="notification_channel_desc">Daily alerts about upcoming duty schedules and ward assignments</string>
+    <string name="notification_persistent_channel_name">Ongoing Shift Status</string>
+    <string name="notification_persistent_channel_desc">Shows ongoing next shift details</string>
+    <string name="notif_tomorrow_title">NXTShift — Tomorrow\'s Duty</string>
+    <string name="notif_next_shift_title">NXTShift — Next Duty</string>
+
+    <!-- Admin Dashboard Strings -->
+    <string name="title_admin_dashboard">Admin Roster Portal</string>
+    <string name="admin_subtitle">Centralized Hospital Roster Publishing</string>
+    <string name="admin_select_month">Select Month &amp; Year</string>
+    <string name="admin_upload_roster">Upload Hospital Roster</string>
+    <string name="admin_btn_upload">Choose Excel / CSV File</string>
+    <string name="admin_btn_save_draft">Save Draft</string>
+    <string name="admin_btn_publish">Publish Roster</string>
+    <string name="admin_status_published">Published (v%1$d)</string>
+    <string name="admin_status_draft">Draft Saved</string>
+    <string name="admin_status_none">No roster uploaded for this month</string>
+    <string name="admin_unauthorized">Unauthorized: You do not have administrator permissions.</string>
+
+    <!-- Published Roster Import Strings -->
+    <string name="title_import_published">Import Published Roster</string>
+    <string name="roster_not_updated_yet">Roster not updated yet. Please check again later.</string>
+    <string name="select_your_name">Select your name from published staff</string>
+    <string name="staff_not_found">Your name was not found in this published roster.</string>
+    <string name="btn_import_to_calendar">Import to My Calendar</string>
+</resources>

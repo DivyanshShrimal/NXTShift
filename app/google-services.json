@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "906614670324",
+    "project_id": "nxtshift-app",
+    "storage_bucket": "nxtshift-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:906614670324:android:2062d21c6b9f7cededefa1",
+        "android_client_info": {
+          "package_name": "com.nxtshift.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDs4CKVrkS6XqsjkvjYTidNDqwxNgQmt-c"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:906614670324:android:a24f7f050699ea24edefa1",
+        "android_client_info": {
+          "package_name": "com.nxtshift.app.debug"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDs4CKVrkS6XqsjkvjYTidNDqwxNgQmt-c"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

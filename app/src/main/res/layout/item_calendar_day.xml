@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="52dp"
+    android:background="?attr/selectableItemBackground"
+    android:clickable="true"
+    android:focusable="true"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:padding="2dp">
+
+    <!-- Day Number Text -->
+    <TextView
+        android:id="@+id/tvDayNumber"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:gravity="center"
+        android:textColor="@color/text_primary"
+        android:textSize="13sp" />
+
+    <!-- Shift Indicator Dot -->
+    <View
+        android:id="@+id/viewShiftDot"
+        android:layout_width="6dp"
+        android:layout_height="6dp"
+        android:layout_marginTop="2dp"
+        android:background="@drawable/bg_badge_rounded"
+        android:backgroundTint="@color/shift_morning"
+        android:visibility="invisible" />
+</LinearLayout>
