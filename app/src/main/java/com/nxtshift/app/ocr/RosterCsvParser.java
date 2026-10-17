@@ -84,13 +84,26 @@ public class RosterCsvParser {
             ext = fileName.substring(fileName.lastIndexOf(".")).toLowerCase(Locale.US);
         }
 
-        List<List<String>> rawRows;
         if (ext.equals(".xlsx")) {
-            rawRows = parseXlsxStream(inputStream);
-        } else {
-            rawRows = parseCsvStream(inputStream);
+            com.nxtshift.app.excel.ExcelRosterData excelData = com.nxtshift.app.excel.ExcelRosterParser.parse(inputStream, fileName, targetYear, targetMonth);
+            if (!excelData.isValid()) {
+                String monthName = Month.of(targetMonth).getDisplayName(TextStyle.FULL, Locale.US);
+                String monthLabel = monthName + " " + targetYear;
+                MonthlyRoster roster = new MonthlyRoster(targetYear, targetMonth, monthLabel);
+                ParseResult result = new ParseResult(roster);
+                result.errors.addAll(excelData.getErrors());
+                result.warnings.addAll(excelData.getWarnings());
+                return result;
+            }
+            MonthlyRoster roster = excelData.toMonthlyRoster();
+            ParseResult result = new ParseResult(roster);
+            result.warnings.addAll(excelData.getWarnings());
+            result.parsedRowCount = excelData.getDays().size();
+            result.totalStaffIdentified = excelData.getUniqueStaffNames().size();
+            return result;
         }
 
+        List<List<String>> rawRows = parseCsvStream(inputStream);
         return parseTableRows(rawRows, targetYear, targetMonth);
     }
 
@@ -385,6 +398,17 @@ public class RosterCsvParser {
             }
         }
 
+        // 1b. Excel serial date number e.g. 46296
+        if (s.matches("^\\d{4,6}(\\.\\d+)?$")) {
+            try {
+                double serial = Double.parseDouble(s);
+                LocalDate d = com.nxtshift.app.excel.ExcelRosterParser.convertSerialToLocalDate(serial, false);
+                if (d.getYear() == targetYear && d.getMonthValue() == targetMonth) {
+                    return d.getDayOfMonth();
+                }
+            } catch (Exception ignored) {}
+        }
+
         // 2. ISO format YYYY-MM-DD
         if (s.matches("^\\d{4}-\\d{2}-\\d{2}.*")) {
             try {
@@ -615,7 +639,7 @@ public class RosterCsvParser {
                                     currentColIndex++;
                                 }
                                 cellValue.setLength(0);
-                            } else if ("v".equals(name)) {
+                            } else if ("v".equals(name) || "t".equals(name)) {
                                 inValue = true;
                             }
                         } else if (eventType == XmlPullParser.TEXT) {
@@ -623,7 +647,7 @@ public class RosterCsvParser {
                                 cellValue.append(parser.getText());
                             }
                         } else if (eventType == XmlPullParser.END_TAG) {
-                            if ("v".equals(name)) {
+                            if ("v".equals(name) || "t".equals(name)) {
                                 inValue = false;
                             } else if ("c".equals(name)) {
                                 String val = cellValue.toString().trim();

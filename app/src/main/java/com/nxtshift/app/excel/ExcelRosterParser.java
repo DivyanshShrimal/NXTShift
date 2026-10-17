@@ -4,7 +4,6 @@ import com.nxtshift.app.domain.ShiftType;
 
 import org.xml.sax.Attributes;
 import org.xml.sax.InputSource;
-import org.xml.sax.SAXException;
 import org.xml.sax.helpers.DefaultHandler;
 
 import java.io.ByteArrayInputStream;
@@ -13,7 +12,6 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.StringReader;
 import java.time.LocalDate;
 import java.time.Month;
 import java.time.YearMonth;
@@ -40,7 +38,8 @@ import javax.xml.parsers.SAXParserFactory;
 /**
  * High-performance, streaming Excel XLSX parser for hospital duty rosters.
  * Implemented with pure Java/SAX and zero external dependencies (no Apache POI required).
- * Reliably extracts date cells, all six hospital shift timings, Off, Leave, and staff assignments.
+ * Reliably extracts date cells (supporting 1900/1904 date systems, custom/built-in date styles,
+ * serial numbers, and text dates), all six hospital shift timings, Off, Leave, and staff assignments.
  */
 public class ExcelRosterParser {
     private static final String TAG = "ExcelRosterParser";
@@ -58,20 +57,31 @@ public class ExcelRosterParser {
         public String colLetter;
         public int rowNum;
         public String value;
+        public String cellType;
+        public int styleIndex = -1;
     }
 
     public static class RawRow {
         public int rowNum;
         public final Map<String, String> cellValues = new LinkedHashMap<>(); // colLetter -> value
+        public final Map<String, RawCell> cells = new LinkedHashMap<>(); // colLetter -> RawCell
     }
 
     public static ExcelRosterData parse(File file) throws IOException {
+        return parse(file, null, null);
+    }
+
+    public static ExcelRosterData parse(File file, Integer targetYear, Integer targetMonth) throws IOException {
         try (FileInputStream fis = new FileInputStream(file)) {
-            return parse(fis, file.getName());
+            return parse(fis, file.getName(), targetYear, targetMonth);
         }
     }
 
     public static ExcelRosterData parse(InputStream inputStream, String fileName) throws IOException {
+        return parse(inputStream, fileName, null, null);
+    }
+
+    public static ExcelRosterData parse(InputStream inputStream, String fileName, Integer targetYear, Integer targetMonth) throws IOException {
         byte[] bytes = readAllBytes(inputStream);
         if (bytes == null || bytes.length == 0) {
             ExcelRosterData empty = new ExcelRosterData(0, 0, "", "");
@@ -79,10 +89,11 @@ public class ExcelRosterParser {
             return empty;
         }
 
-        // 1. Discover sheets and choose primary roster sheet
+        // 1. Discover sheets, date system and choose primary roster sheet
         Map<String, String> sheetNameToRelId = new LinkedHashMap<>();
         Map<String, String> relIdToTarget = new HashMap<>();
-        parseWorkbookMetadata(bytes, sheetNameToRelId, relIdToTarget);
+        boolean[] isDate1904 = new boolean[]{false};
+        parseWorkbookMetadata(bytes, sheetNameToRelId, relIdToTarget, isDate1904);
 
         String targetSheetName = selectPrimaryRosterSheet(sheetNameToRelId.keySet());
         if (targetSheetName == null) {
@@ -101,7 +112,10 @@ public class ExcelRosterParser {
         // 2. Extract shared strings if present
         List<String> sharedStrings = extractSharedStrings(bytes);
 
-        // 3. Extract raw rows from target worksheet
+        // 3. Extract styles & date formatting info
+        Set<Integer> dateStyleIndices = parseWorkbookStyles(bytes);
+
+        // 4. Extract raw rows from target worksheet
         List<RawRow> rawRows = extractSheetRows(bytes, targetEntryPath, sharedStrings);
         if (rawRows.isEmpty()) {
             ExcelRosterData errData = new ExcelRosterData(0, 0, "", targetSheetName);
@@ -109,25 +123,26 @@ public class ExcelRosterParser {
             return errData;
         }
 
-        // 4. Transform raw rows into structured ExcelRosterData
-        return processSheetGrid(rawRows, targetSheetName);
+        // 5. Transform raw rows into structured ExcelRosterData with generic month/year filtering
+        return processSheetGrid(rawRows, targetSheetName, targetYear, targetMonth, isDate1904[0], dateStyleIndices);
     }
 
     private static String selectPrimaryRosterSheet(Set<String> sheetNames) {
         if (sheetNames == null || sheetNames.isEmpty()) return null;
 
-        // 1. Explicitly check for sheet containing "roster" (case-insensitive)
+        // 1. Explicitly check for sheet containing "roster" (case-insensitive) and not notes/readme
         for (String name : sheetNames) {
             String lower = name.toLowerCase(Locale.US);
-            if (lower.contains("roster") && !lower.contains("notes") && !lower.contains("readme")) {
+            if (lower.contains("roster") && !lower.contains("notes") && !lower.contains("readme") && !lower.contains("summary")) {
                 return name;
             }
         }
 
-        // 2. Select first sheet that is not Notes/Summary/Readme/Master
+        // 2. Select first sheet that is not Notes/Summary/Readme/Master/Legend
         for (String name : sheetNames) {
             String lower = name.toLowerCase(Locale.US);
-            if (!lower.contains("notes") && !lower.contains("readme") && !lower.contains("read me") && !lower.contains("summary") && !lower.contains("footer")) {
+            if (!lower.contains("notes") && !lower.contains("readme") && !lower.contains("read me")
+                    && !lower.contains("summary") && !lower.contains("footer") && !lower.contains("legend")) {
                 return name;
             }
         }
@@ -148,7 +163,8 @@ public class ExcelRosterParser {
 
     // --- XML Metadata Parsing ---
 
-    private static void parseWorkbookMetadata(byte[] bytes, Map<String, String> sheetNameToRelId, Map<String, String> relIdToTarget) {
+    private static void parseWorkbookMetadata(byte[] bytes, Map<String, String> sheetNameToRelId,
+                                              Map<String, String> relIdToTarget, boolean[] isDate1904) {
         try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(bytes))) {
             ZipEntry entry;
             SAXParserFactory factory = SAXParserFactory.newInstance();
@@ -162,7 +178,8 @@ public class ExcelRosterParser {
                     saxParser.parse(new InputSource(new NonClosingInputStream(zis)), new DefaultHandler() {
                         @Override
                         public void startElement(String uri, String localName, String qName, Attributes attributes) {
-                            if ("sheet".equals(localName) || "sheet".equals(qName)) {
+                            String tag = localName != null && !localName.isEmpty() ? localName : qName;
+                            if ("sheet".equals(tag)) {
                                 String sheetName = attributes.getValue("name");
                                 String rid = attributes.getValue("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id");
                                 if (rid == null) {
@@ -171,6 +188,13 @@ public class ExcelRosterParser {
                                 if (sheetName != null && rid != null) {
                                     sheetNameToRelId.put(sheetName, rid);
                                 }
+                            } else if ("workbookPr".equals(tag)) {
+                                String d1904 = attributes.getValue("date1904");
+                                if ("1".equals(d1904) || "true".equalsIgnoreCase(d1904)) {
+                                    if (isDate1904 != null && isDate1904.length > 0) {
+                                        isDate1904[0] = true;
+                                    }
+                                }
                             }
                         }
                     });
@@ -178,7 +202,8 @@ public class ExcelRosterParser {
                     saxParser.parse(new InputSource(new NonClosingInputStream(zis)), new DefaultHandler() {
                         @Override
                         public void startElement(String uri, String localName, String qName, Attributes attributes) {
-                            if ("Relationship".equals(localName) || "Relationship".equals(qName)) {
+                            String tag = localName != null && !localName.isEmpty() ? localName : qName;
+                            if ("Relationship".equals(tag)) {
                                 String id = attributes.getValue("Id");
                                 String target = attributes.getValue("Target");
                                 if (id != null && target != null) {
@@ -189,9 +214,83 @@ public class ExcelRosterParser {
                     });
                 }
             }
-        } catch (Exception e) {
-            // Ignore metadata failure; defaults will take over
+        } catch (Exception ignored) {}
+    }
+
+    private static Set<Integer> parseWorkbookStyles(byte[] bytes) {
+        Set<Integer> dateStyleIndices = new LinkedHashSet<>();
+        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(bytes))) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                String name = entry.getName().replace('\\', '/');
+                if (name.endsWith("xl/styles.xml")) {
+                    SAXParserFactory factory = SAXParserFactory.newInstance();
+                    factory.setNamespaceAware(true);
+                    SAXParser saxParser = factory.newSAXParser();
+
+                    Map<Integer, String> customNumFmts = new HashMap<>();
+                    List<Integer> xfNumFmtIds = new ArrayList<>();
+
+                    saxParser.parse(new InputSource(new NonClosingInputStream(zis)), new DefaultHandler() {
+                        private boolean inCellXfs = false;
+
+                        @Override
+                        public void startElement(String uri, String localName, String qName, Attributes attributes) {
+                            String tag = localName != null && !localName.isEmpty() ? localName : qName;
+                            if ("numFmt".equals(tag)) {
+                                String idStr = attributes.getValue("numFmtId");
+                                String code = attributes.getValue("formatCode");
+                                if (idStr != null && code != null) {
+                                    try {
+                                        customNumFmts.put(Integer.parseInt(idStr), code);
+                                    } catch (NumberFormatException ignored) {}
+                                }
+                            } else if ("cellXfs".equals(tag)) {
+                                inCellXfs = true;
+                            } else if ("xf".equals(tag) && inCellXfs) {
+                                String fmtIdStr = attributes.getValue("numFmtId");
+                                int fmtId = 0;
+                                if (fmtIdStr != null) {
+                                    try {
+                                        fmtId = Integer.parseInt(fmtIdStr);
+                                    } catch (NumberFormatException ignored) {}
+                                }
+                                xfNumFmtIds.add(fmtId);
+                            }
+                        }
+
+                        @Override
+                        public void endElement(String uri, String localName, String qName) {
+                            String tag = localName != null && !localName.isEmpty() ? localName : qName;
+                            if ("cellXfs".equals(tag)) {
+                                inCellXfs = false;
+                            }
+                        }
+                    });
+
+                    for (int i = 0; i < xfNumFmtIds.size(); i++) {
+                        int fmtId = xfNumFmtIds.get(i);
+                        if (isDateNumFmt(fmtId, customNumFmts)) {
+                            dateStyleIndices.add(i);
+                        }
+                    }
+                    break;
+                }
+            }
+        } catch (Exception ignored) {}
+        return dateStyleIndices;
+    }
+
+    private static boolean isDateNumFmt(int fmtId, Map<Integer, String> customFmts) {
+        if ((fmtId >= 14 && fmtId <= 22) || (fmtId >= 27 && fmtId <= 36) || (fmtId >= 45 && fmtId <= 47) || (fmtId >= 50 && fmtId <= 58)) {
+            return true;
         }
+        String code = customFmts.get(fmtId);
+        if (code != null) {
+            String clean = code.replaceAll("\".*?\"", "").replaceAll("\\[.*?\\]", "").toLowerCase(Locale.US);
+            return clean.contains("y") || clean.contains("d") || clean.contains("m") || clean.contains("h") || clean.contains("s");
+        }
+        return false;
     }
 
     private static List<String> extractSharedStrings(byte[] bytes) {
@@ -211,7 +310,8 @@ public class ExcelRosterParser {
 
                         @Override
                         public void startElement(String uri, String localName, String qName, Attributes attributes) {
-                            if ("t".equals(localName) || "t".equals(qName)) {
+                            String tag = localName != null && !localName.isEmpty() ? localName : qName;
+                            if ("t".equals(tag)) {
                                 inText = true;
                             }
                         }
@@ -225,9 +325,10 @@ public class ExcelRosterParser {
 
                         @Override
                         public void endElement(String uri, String localName, String qName) {
-                            if ("t".equals(localName) || "t".equals(qName)) {
+                            String tag = localName != null && !localName.isEmpty() ? localName : qName;
+                            if ("t".equals(tag)) {
                                 inText = false;
-                            } else if ("si".equals(localName) || "si".equals(qName)) {
+                            } else if ("si".equals(tag)) {
                                 strings.add(currentString.toString());
                                 currentString.setLength(0);
                             }
@@ -257,6 +358,7 @@ public class ExcelRosterParser {
                         private RawRow currentRow = null;
                         private String currentCellRef = null;
                         private String currentCellType = null;
+                        private int currentCellStyle = -1;
                         private final StringBuilder cellContent = new StringBuilder();
                         private boolean inValueOrText = false;
 
@@ -272,6 +374,13 @@ public class ExcelRosterParser {
                             } else if ("c".equals(tag)) {
                                 currentCellRef = attributes.getValue("r");
                                 currentCellType = attributes.getValue("t");
+                                String sAttr = attributes.getValue("s");
+                                currentCellStyle = -1;
+                                if (sAttr != null && sAttr.matches("^\\d+$")) {
+                                    try {
+                                        currentCellStyle = Integer.parseInt(sAttr);
+                                    } catch (NumberFormatException ignored) {}
+                                }
                                 cellContent.setLength(0);
                             } else if ("v".equals(tag) || "t".equals(tag)) {
                                 inValueOrText = true;
@@ -305,10 +414,20 @@ public class ExcelRosterParser {
                                     }
 
                                     String colLetter = extractColLetter(currentCellRef);
+                                    RawCell cell = new RawCell();
+                                    cell.ref = currentCellRef;
+                                    cell.colLetter = colLetter;
+                                    cell.rowNum = currentRow.rowNum;
+                                    cell.value = finalVal;
+                                    cell.cellType = currentCellType;
+                                    cell.styleIndex = currentCellStyle;
+
+                                    currentRow.cells.put(colLetter, cell);
                                     currentRow.cellValues.put(colLetter, finalVal);
                                 }
                                 currentCellRef = null;
                                 currentCellType = null;
+                                currentCellStyle = -1;
                                 cellContent.setLength(0);
                             } else if ("row".equals(tag)) {
                                 if (currentRow != null && !currentRow.cellValues.isEmpty()) {
@@ -321,9 +440,7 @@ public class ExcelRosterParser {
                     break;
                 }
             }
-        } catch (Exception e) {
-            // Error logged
-        }
+        } catch (Exception ignored) {}
 
         // Sort rows by rowNum
         rows.sort(Comparator.comparingInt(r -> r.rowNum));
@@ -355,21 +472,24 @@ public class ExcelRosterParser {
 
     // --- Grid Analysis & Roster Assembly ---
 
-    private static ExcelRosterData processSheetGrid(List<RawRow> rows, String sheetName) {
+    private static ExcelRosterData processSheetGrid(List<RawRow> rows, String sheetName,
+                                                   Integer targetYear, Integer targetMonth,
+                                                   boolean isDate1904, Set<Integer> dateStyleIndices) {
         // 1. Identify header row
         int headerRowIndex = -1;
         RawRow headerRow = null;
         String dateColLetter = null;
         List<ExcelShiftColumn> columns = new ArrayList<>();
 
-        for (int i = 0; i < Math.min(rows.size(), 10); i++) {
+        for (int i = 0; i < Math.min(rows.size(), 15); i++) {
             RawRow row = rows.get(i);
             List<ExcelShiftColumn> candidateCols = detectColumnsFromHeaderRow(row);
             String candidateDateCol = null;
 
             for (Map.Entry<String, String> e : row.cellValues.entrySet()) {
                 String val = normalizeString(e.getValue()).toLowerCase(Locale.US);
-                if (val.equals("date") || val.equals("day") || val.equals("d") || val.startsWith("date ")) {
+                if (val.equals("date") || val.equals("day") || val.equals("d") || val.equals("dates")
+                        || val.equals("duty date") || val.startsWith("date ") || val.startsWith("date/")) {
                     candidateDateCol = e.getKey();
                     break;
                 }
@@ -393,49 +513,69 @@ public class ExcelRosterParser {
         // Sort columns by position (A, B, C...)
         columns.sort(Comparator.comparingInt(ExcelShiftColumn::getColumnIndex));
 
-        // 2. Extract Data Rows and Discover Dates & Staff
-        List<ExcelDayRow> dayRows = new ArrayList<>();
-        Set<String> allStaffNames = new LinkedHashSet<>();
-        List<String> warnings = new ArrayList<>();
+        // 2. Discover target year and month
+        Integer finalYear = targetYear;
+        Integer finalMonth = targetMonth;
 
-        Integer inferredYear = null;
-        Integer inferredMonth = null;
-
-        // Try extracting year and month from sheet name (e.g. "Roster Oct 2026")
-        int[] ymFromSheet = parseMonthYearFromText(sheetName);
-        if (ymFromSheet != null) {
-            inferredYear = ymFromSheet[0];
-            inferredMonth = ymFromSheet[1];
+        if (finalYear == null || finalMonth == null) {
+            int[] ymFromSheet = parseMonthYearFromText(sheetName);
+            if (ymFromSheet != null) {
+                finalYear = ymFromSheet[0];
+                finalMonth = ymFromSheet[1];
+            }
         }
 
-        // Inspect title row if row 0 has title text
-        if (inferredYear == null && rows.size() > 0) {
-            for (String val : rows.get(0).cellValues.values()) {
-                int[] ym = parseMonthYearFromText(val);
-                if (ym != null) {
-                    inferredYear = ym[0];
-                    inferredMonth = ym[1];
+        if (finalYear == null || finalMonth == null) {
+            for (int r = 0; r < headerRowIndex; r++) {
+                for (String val : rows.get(r).cellValues.values()) {
+                    int[] ym = parseMonthYearFromText(val);
+                    if (ym != null) {
+                        finalYear = ym[0];
+                        finalMonth = ym[1];
+                        break;
+                    }
+                }
+                if (finalYear != null) break;
+            }
+        }
+
+        if (finalYear == null || finalMonth == null) {
+            for (int i = headerRowIndex + 1; i < rows.size(); i++) {
+                RawRow row = rows.get(i);
+                RawCell cell = row.cells.get(dateColLetter);
+                LocalDate d = parseCellDate(cell, null, null, isDate1904, dateStyleIndices);
+                if (d != null) {
+                    finalYear = d.getYear();
+                    finalMonth = d.getMonthValue();
                     break;
                 }
             }
         }
 
+        if (finalYear == null) finalYear = LocalDate.now().getYear();
+        if (finalMonth == null) finalMonth = LocalDate.now().getMonthValue();
+
+        // 3. Extract Data Rows and Discover Dates & Staff
+        List<ExcelDayRow> dayRows = new ArrayList<>();
+        Set<String> allStaffNames = new LinkedHashSet<>();
+        List<String> warnings = new ArrayList<>();
+
         for (int i = headerRowIndex + 1; i < rows.size(); i++) {
             RawRow row = rows.get(i);
-            String dateRaw = row.cellValues.get(dateColLetter);
-            if (dateRaw == null || dateRaw.trim().isEmpty()) {
+            RawCell dateCell = row.cells.get(dateColLetter);
+            if (dateCell == null || dateCell.value == null || dateCell.value.trim().isEmpty()) {
                 continue;
             }
 
-            LocalDate parsedDate = parseCellDate(dateRaw, inferredYear, inferredMonth);
+            LocalDate parsedDate = parseCellDate(dateCell, finalYear, finalMonth, isDate1904, dateStyleIndices);
             if (parsedDate == null) {
-                // If it's a non-date footer row, stop or skip
+                // Non-date footer or notes row, skip
                 continue;
             }
 
-            if (inferredYear == null) {
-                inferredYear = parsedDate.getYear();
-                inferredMonth = parsedDate.getMonthValue();
+            // Filter to ensure row matches the target year and month
+            if (parsedDate.getYear() != finalYear || parsedDate.getMonthValue() != finalMonth) {
+                continue;
             }
 
             String isoDate = parsedDate.format(DateTimeFormatter.ISO_LOCAL_DATE);
@@ -459,14 +599,10 @@ public class ExcelRosterParser {
             dayRows.add(dayRow);
         }
 
-        // Fallback default if no year/month detected
-        if (inferredYear == null) inferredYear = 2026;
-        if (inferredMonth == null) inferredMonth = 10;
+        String monthName = Month.of(finalMonth).getDisplayName(TextStyle.FULL, Locale.US);
+        String monthLabel = monthName + " " + finalYear;
 
-        String monthName = Month.of(inferredMonth).getDisplayName(TextStyle.FULL, Locale.US);
-        String monthLabel = monthName + " " + inferredYear;
-
-        ExcelRosterData data = new ExcelRosterData(inferredYear, inferredMonth, monthLabel, sheetName);
+        ExcelRosterData data = new ExcelRosterData(finalYear, finalMonth, monthLabel, sheetName);
         data.getColumns().addAll(columns);
         data.getDays().addAll(dayRows);
         data.getWarnings().addAll(warnings);
@@ -477,7 +613,7 @@ public class ExcelRosterParser {
         data.getUniqueStaffNames().addAll(sortedStaff);
 
         if (dayRows.isEmpty()) {
-            data.getErrors().add("No valid dates found under the '" + dateColLetter + "' column in worksheet '" + sheetName + "'.");
+            data.getErrors().add("No valid dates found matching " + monthLabel + " in worksheet '" + sheetName + "'.");
         }
         if (sortedStaff.isEmpty()) {
             data.getErrors().add("No staff assignments found in any duty, Off, or Leave column.");
@@ -496,7 +632,8 @@ public class ExcelRosterParser {
             String norm = normalizeString(rawHeader).toLowerCase(Locale.US);
             String compact = norm.replaceAll("\\s+", "");
 
-            if (norm.equals("date") || norm.equals("day") || norm.equals("d") || norm.startsWith("date ")) {
+            if (norm.equals("date") || norm.equals("day") || norm.equals("d") || norm.equals("dates")
+                    || norm.equals("duty date") || norm.startsWith("date ") || norm.startsWith("date/")) {
                 // Handled as date column
                 continue;
             }
@@ -548,19 +685,54 @@ public class ExcelRosterParser {
         return names;
     }
 
+    /**
+     * Converts an Excel serial date number to LocalDate according to the workbook date system.
+     * Supports both standard 1900 system (with Lotus 1-2-3 leap year workaround) and 1904 Mac system.
+     */
+    public static LocalDate convertSerialToLocalDate(double serial, boolean isDate1904) {
+        int wholeDays = (int) Math.floor(serial);
+        if (isDate1904) {
+            return LocalDate.of(1904, 1, 1).plusDays(wholeDays);
+        } else {
+            if (wholeDays < 1) {
+                return LocalDate.of(1899, 12, 31);
+            } else if (wholeDays < 60) {
+                return LocalDate.of(1899, 12, 31).plusDays(wholeDays);
+            } else if (wholeDays == 60) {
+                return LocalDate.of(1900, 2, 28);
+            } else {
+                return LocalDate.of(1899, 12, 30).plusDays(wholeDays);
+            }
+        }
+    }
+
+    public static LocalDate parseCellDate(RawCell cell, Integer contextYear, Integer contextMonth, boolean isDate1904, Set<Integer> dateStyleIndices) {
+        if (cell == null) return null;
+        boolean isDateStyle = cell.styleIndex >= 0 && dateStyleIndices != null && dateStyleIndices.contains(cell.styleIndex);
+        return parseCellDate(cell.value, contextYear, contextMonth, isDate1904, isDateStyle);
+    }
+
     public static LocalDate parseCellDate(String dateStr, Integer fallbackYear, Integer fallbackMonth) {
+        return parseCellDate(dateStr, fallbackYear, fallbackMonth, false, false);
+    }
+
+    public static LocalDate parseCellDate(String dateStr, Integer fallbackYear, Integer fallbackMonth, boolean isDate1904) {
+        return parseCellDate(dateStr, fallbackYear, fallbackMonth, isDate1904, false);
+    }
+
+    public static LocalDate parseCellDate(String dateStr, Integer contextYear, Integer contextMonth, boolean isDate1904, boolean isKnownDateStyle) {
         if (dateStr == null) return null;
         String s = dateStr.trim();
+        if (s.isEmpty()) return null;
 
-        // 1. Excel serial number: e.g. 46296 (standard Windows Excel 1900 date system)
+        // 1. Excel serial number: e.g. 46296
         if (s.matches("^\\d{4,6}(\\.\\d+)?$")) {
             try {
                 double serial = Double.parseDouble(s);
                 int days = (int) Math.round(serial);
-                // Serial dates between 30000 (1982) and 60000 (2064)
-                if (days >= 30000 && days <= 70000) {
-                    LocalDate base = LocalDate.of(1899, 12, 30);
-                    return base.plusDays(days);
+                // Serial dates between 1000 (1902) and 100000 (2173)
+                if (isKnownDateStyle || (days >= 1000 && days <= 100000)) {
+                    return convertSerialToLocalDate(serial, isDate1904);
                 }
             } catch (Exception ignored) {}
         }
@@ -572,18 +744,18 @@ public class ExcelRosterParser {
             } catch (Exception ignored) {}
         }
 
-        // 3. Simple day integer (e.g. "1", "02", "15")
-        if (s.matches("^\\d{1,2}$") && fallbackYear != null && fallbackMonth != null) {
+        // 3. Simple day integer (e.g. "1", "02", "15") within target month
+        if (s.matches("^\\d{1,2}$") && contextYear != null && contextMonth != null) {
             try {
                 int day = Integer.parseInt(s);
-                YearMonth ym = YearMonth.of(fallbackYear, fallbackMonth);
+                YearMonth ym = YearMonth.of(contextYear, contextMonth);
                 if (day >= 1 && day <= ym.lengthOfMonth()) {
-                    return LocalDate.of(fallbackYear, fallbackMonth, day);
+                    return LocalDate.of(contextYear, contextMonth, day);
                 }
             } catch (Exception ignored) {}
         }
 
-        // 4. DD/MM/YYYY or DD-MM-YYYY
+        // 4. DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
         Pattern p = Pattern.compile("^(\\d{1,2})[/\\-\\.](\\d{1,2})[/\\-\\.](\\d{2,4})");
         Matcher m = p.matcher(s);
         if (m.find()) {
@@ -596,7 +768,7 @@ public class ExcelRosterParser {
             } catch (Exception ignored) {}
         }
 
-        // 5. "1-Oct-2026" or "1-Oct" or "01 Oct"
+        // 5. "1-Oct-2026" or "1-Oct" or "01 Oct" or "1 October 2026"
         Pattern p2 = Pattern.compile("^(\\d{1,2})\\s*[-/]?\\s*([A-Za-z]{3,9})(?:\\s*[-/]?\\s*(\\d{2,4}))?");
         Matcher m2 = p2.matcher(s);
         if (m2.find()) {
@@ -604,9 +776,27 @@ public class ExcelRosterParser {
                 int day = Integer.parseInt(m2.group(1));
                 String mStr = m2.group(2);
                 int month = parseMonthName(mStr);
-                int year = fallbackYear != null ? fallbackYear : 2026;
+                int year = contextYear != null ? contextYear : 2026;
                 if (m2.group(3) != null) {
                     year = Integer.parseInt(m2.group(3));
+                    if (year < 100) year += 2000;
+                }
+                if (month >= 1 && month <= 12) {
+                    return LocalDate.of(year, month, day);
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // 6. "October 1, 2026" or "Oct 1"
+        Pattern p3 = Pattern.compile("^([A-Za-z]{3,9})\\s+(\\d{1,2})(?:,? +(\\d{2,4}))?");
+        Matcher m3 = p3.matcher(s);
+        if (m3.find()) {
+            try {
+                int month = parseMonthName(m3.group(1));
+                int day = Integer.parseInt(m3.group(2));
+                int year = contextYear != null ? contextYear : 2026;
+                if (m3.group(3) != null) {
+                    year = Integer.parseInt(m3.group(3));
                     if (year < 100) year += 2000;
                 }
                 if (month >= 1 && month <= 12) {

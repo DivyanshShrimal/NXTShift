@@ -1,5 +1,6 @@
 package com.nxtshift.app.excel;
 
+import com.nxtshift.app.data.model.MonthlyRoster;
 import com.nxtshift.app.domain.ShiftType;
 
 import java.io.Serializable;
@@ -183,5 +184,53 @@ public class ExcelRosterData implements Serializable {
             }
         }
         return false;
+    }
+
+    /**
+     * Converts parsed Excel roster data into the central MonthlyRoster domain model
+     * suitable for publishing and admin storage.
+     */
+    public MonthlyRoster toMonthlyRoster() {
+        MonthlyRoster roster = new MonthlyRoster(year, month, monthLabel);
+        roster.getStaffList().addAll(uniqueStaffNames);
+
+        for (ExcelShiftColumn col : columns) {
+            MonthlyRoster.ShiftColumnDefinition def = new MonthlyRoster.ShiftColumnDefinition(
+                    col.getHeaderName(),
+                    col.getShiftType() != null ? col.getShiftType().name() : "GENERAL",
+                    col.getStartTime(),
+                    col.getEndTime(),
+                    col.isOvernight(),
+                    col.isOff(),
+                    col.isLeave()
+            );
+            roster.getShiftColumns().add(def);
+        }
+
+        for (ExcelDayRow dayRow : days) {
+            MonthlyRoster.DaySchedule day = new MonthlyRoster.DaySchedule(dayRow.getIsoDate(), dayRow.getDayNumber());
+            for (ExcelShiftColumn col : columns) {
+                List<String> staff = dayRow.getStaffForColumn(col.getColumnIndex());
+                if (staff == null || staff.isEmpty()) continue;
+                if (col.isLeave()) {
+                    day.getLeaveStaff().addAll(staff);
+                } else if (col.isOff()) {
+                    day.getOffStaff().addAll(staff);
+                } else {
+                    MonthlyRoster.ShiftAssignment assignment = new MonthlyRoster.ShiftAssignment(
+                            col.getHeaderName(),
+                            col.getShiftType() != null ? col.getShiftType().name() : "GENERAL",
+                            col.getStartTime(),
+                            col.getEndTime(),
+                            col.isOvernight(),
+                            staff
+                    );
+                    day.getShiftAssignments().add(assignment);
+                }
+            }
+            roster.getDays().add(day);
+        }
+
+        return roster;
     }
 }

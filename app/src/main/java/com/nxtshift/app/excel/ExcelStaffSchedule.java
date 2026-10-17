@@ -45,6 +45,16 @@ public class ExcelStaffSchedule implements Serializable {
 
     public List<ExcelStaffScheduleItem> getItems() { return items; }
 
+    public ExcelStaffScheduleItem getItemForDate(String isoDate) {
+        if (isoDate == null) return null;
+        for (ExcelStaffScheduleItem item : items) {
+            if (isoDate.equals(item.getDate())) {
+                return item;
+            }
+        }
+        return null;
+    }
+
     public void addItem(ExcelStaffScheduleItem item) {
         items.add(item);
         recomputeCounts();

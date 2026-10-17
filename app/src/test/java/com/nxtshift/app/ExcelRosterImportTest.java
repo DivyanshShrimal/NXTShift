@@ -9,6 +9,7 @@ import com.nxtshift.app.excel.ExcelRosterParser;
 import com.nxtshift.app.excel.ExcelShiftColumn;
 import com.nxtshift.app.excel.ExcelStaffSchedule;
 import com.nxtshift.app.excel.ExcelStaffScheduleItem;
+import com.nxtshift.app.ocr.RosterCsvParser;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -32,6 +33,7 @@ import static org.junit.Assert.*;
 public class ExcelRosterImportTest {
 
     private File referenceFile;
+    private File autoRecoveredFile;
 
     @Before
     public void setUp() {
@@ -44,6 +46,14 @@ public class ExcelRosterImportTest {
         }
         if (!referenceFile.exists()) {
             referenceFile = new File("C:/Users/shrim/Downloads/October_2026_Hospital_Roster_OnePage.xlsx");
+        }
+
+        autoRecoveredFile = new File("roster_fixtures/October_2026_Hospital_Roster_OnePage(AutoRecovered).xlsx");
+        if (!autoRecoveredFile.exists()) {
+            autoRecoveredFile = new File("../roster_fixtures/October_2026_Hospital_Roster_OnePage(AutoRecovered).xlsx");
+        }
+        if (!autoRecoveredFile.exists()) {
+            autoRecoveredFile = new File("C:/Users/shrim/Documents/NXTShift/roster_fixtures/October_2026_Hospital_Roster_OnePage(AutoRecovered).xlsx");
         }
     }
 
@@ -402,5 +412,160 @@ public class ExcelRosterImportTest {
         // Non-date string
         LocalDate d6 = ExcelRosterParser.parseCellDate("Footer Note", 2026, 10);
         assertNull(d6);
+    }
+
+    // --- 5. Regression & Generic Multi-Month/Year Tests ---
+
+    @Test
+    public void testCase16_AutoRecoveredWorkbookParsing_All31DatesOct1ToOct31AndStaff() throws Exception {
+        assertTrue("AutoRecovered reference Excel file must exist in test fixtures", autoRecoveredFile.exists());
+        ExcelRosterData roster = ExcelRosterParser.parse(autoRecoveredFile, 2026, 10);
+
+        assertTrue("Roster data must be valid without fatal errors", roster.isValid());
+        assertEquals("Expected 0 fatal errors", 0, roster.getErrors().size());
+        assertEquals("Expected year 2026", 2026, roster.getYear());
+        assertEquals("Expected month 10", 10, roster.getMonth());
+
+        // Assert that all 31 October dates are recognized
+        List<ExcelDayRow> days = roster.getDays();
+        assertEquals("All 31 October dates must be recognized", 31, days.size());
+
+        // Assert October 1 converts to 2026-10-01
+        ExcelDayRow firstDay = days.get(0);
+        assertEquals("First day must be 1", 1, firstDay.getDayNumber());
+        assertEquals("October 1 must convert to 2026-10-01", "2026-10-01", firstDay.getIsoDate());
+
+        // Assert October 31 converts to 2026-10-31
+        ExcelDayRow lastDay = days.get(30);
+        assertEquals("Last day must be 31", 31, lastDay.getDayNumber());
+        assertEquals("October 31 must convert to 2026-10-31", "2026-10-31", lastDay.getIsoDate());
+
+        // Assert all 8 columns (six shifts, Off, Leave) are extracted
+        assertEquals("Expected 8 total columns (6 shifts + Off + Leave)", 8, roster.getColumns().size());
+
+        // Assert staff names are extracted
+        List<String> staff = roster.getUniqueStaffNames();
+        assertTrue("Must extract at least 10 unique clinical staff members", staff.size() >= 10);
+        assertTrue("Must contain Ram", staff.contains("Ram"));
+        assertTrue("Must contain Vikas", staff.contains("Vikas"));
+        assertTrue("Must contain Kuldeep", staff.contains("Kuldeep"));
+
+        // Multi-word name distinction: Ajay Jangid vs Ajay Jindoliya
+        assertTrue("Must extract Ajay Jangid", staff.contains("Ajay Jangid"));
+        assertTrue("Must extract Ajay Jindoliya", staff.contains("Ajay Jindoliya"));
+        assertNotEquals("Ajay Jangid and Ajay Jindoliya must be distinct",
+                staff.indexOf("Ajay Jangid"), staff.indexOf("Ajay Jindoliya"));
+
+        // Notes sheet footer names must NOT be included in staff roster
+        assertFalse("Notes sheet footer name Major (Dr) Anil Sharma must be excluded",
+                staff.contains("Major (Dr) Anil Sharma"));
+        assertFalse("Notes sheet footer name Dr. Manisha Agrawal must be excluded",
+                staff.contains("Dr. Manisha Agrawal"));
+        assertFalse("Notes sheet footer name Ms. Shalini Jha must be excluded",
+                staff.contains("Ms. Shalini Jha"));
+        assertFalse("Notes sheet footer name Mr. Tarun Sharma must be excluded",
+                staff.contains("Mr. Tarun Sharma"));
+
+        // Assert Off and Leave categorization for Ajay Jindoliya on 2026-10-02
+        ExcelStaffSchedule jindoliyaSchedule = roster.extractScheduleForStaff("Ajay Jindoliya");
+        ExcelStaffScheduleItem itemOct2 = jindoliyaSchedule.getItemForDate("2026-10-02");
+        assertNotNull("Schedule item for 2026-10-02 must exist", itemOct2);
+        assertTrue("Must flag conflict between Off and Leave on Oct 2", itemOct2.hasConflict());
+        assertTrue("Conflicting list must contain Weekly Off",
+                itemOct2.getConflictingAssignments().contains("Weekly Off"));
+        assertTrue("Conflicting list must contain On Leave",
+                itemOct2.getConflictingAssignments().contains("On Leave"));
+    }
+
+    @Test
+    public void testCase17_GenericDateParsing_AllMonthsYearsAndLeapYears() {
+        // October 2026 (standard 31 days)
+        LocalDate oct1 = ExcelRosterParser.parseCellDate("46296", 2026, 10);
+        assertEquals(LocalDate.of(2026, 10, 1), oct1);
+        LocalDate oct31 = ExcelRosterParser.parseCellDate("46326", 2026, 10);
+        assertEquals(LocalDate.of(2026, 10, 31), oct31);
+
+        // November 2026 (standard 30 days)
+        LocalDate nov1 = ExcelRosterParser.parseCellDate("46327", 2026, 11);
+        assertEquals(LocalDate.of(2026, 11, 1), nov1);
+        LocalDate nov30 = ExcelRosterParser.parseCellDate("46356", 2026, 11);
+        assertEquals(LocalDate.of(2026, 11, 30), nov30);
+
+        // January 2027 (future year, 31 days)
+        LocalDate jan1 = ExcelRosterParser.parseCellDate("46388", 2027, 1);
+        assertEquals(LocalDate.of(2027, 1, 1), jan1);
+        LocalDate jan31 = ExcelRosterParser.parseCellDate("46418", 2027, 1);
+        assertEquals(LocalDate.of(2027, 1, 31), jan31);
+
+        // February 2028 (LEAP YEAR: 29 days!)
+        LocalDate feb1 = ExcelRosterParser.parseCellDate("46784", 2028, 2);
+        assertEquals(LocalDate.of(2028, 2, 1), feb1);
+        LocalDate feb29 = ExcelRosterParser.parseCellDate("46812", 2028, 2);
+        assertEquals(LocalDate.of(2028, 2, 29), feb29);
+        assertTrue("2028 must be recognized as leap year", feb29.isLeapYear());
+        assertEquals("Feb 2028 must have 29 days", 29, feb29.lengthOfMonth());
+
+        // Plain text day with leap year context
+        LocalDate feb29Text = ExcelRosterParser.parseCellDate("29", 2028, 2);
+        assertNotNull(feb29Text);
+        assertEquals(LocalDate.of(2028, 2, 29), feb29Text);
+
+        // Plain text day 29 in non-leap year (e.g. Feb 2027) must be rejected
+        LocalDate feb29Invalid = ExcelRosterParser.parseCellDate("29", 2027, 2);
+        assertNull("Feb 29 in 2027 must be rejected as invalid", feb29Invalid);
+    }
+
+    @Test
+    public void testCase18_WorkbookDateSystem1900vs1904() {
+        // 1900 Date System (Windows standard):
+        // Serial 46296 -> 2026-10-01
+        LocalDate d1900 = ExcelRosterParser.convertSerialToLocalDate(46296, false);
+        assertEquals(LocalDate.of(2026, 10, 1), d1900);
+
+        // 1904 Date System (Mac standard):
+        // 1904-01-01 is serial 0
+        LocalDate macBase = ExcelRosterParser.convertSerialToLocalDate(0, true);
+        assertEquals(LocalDate.of(1904, 1, 1), macBase);
+
+        // In 1904 date system, 2026-10-01 is serial 44834 (46296 - 1462)
+        LocalDate macOct1 = ExcelRosterParser.convertSerialToLocalDate(44834, true);
+        assertEquals(LocalDate.of(2026, 10, 1), macOct1);
+    }
+
+    @Test
+    public void testCase19_MonthAndYearFilteringBehavior() throws Exception {
+        // Matching month (October 2026) -> 31 days parsed
+        ExcelRosterData matching = ExcelRosterParser.parse(autoRecoveredFile, 2026, 10);
+        assertTrue("Matching month must be valid", matching.isValid());
+        assertEquals(31, matching.getDays().size());
+
+        // Non-matching month (November 2026 selected for October file) -> 0 matching days and error reported
+        ExcelRosterData nonMatching = ExcelRosterParser.parse(autoRecoveredFile, 2026, 11);
+        assertFalse("Non-matching month must not be valid", nonMatching.isValid());
+        assertEquals(0, nonMatching.getDays().size());
+        assertTrue("Must report error for no matching dates",
+                nonMatching.getErrors().get(0).contains("No valid dates found matching November 2026"));
+
+        // When month/year is omitted (null), infers from sheet name and parses all 31 days
+        ExcelRosterData inferred = ExcelRosterParser.parse(autoRecoveredFile, null, null);
+        assertTrue("Inferred month must be valid", inferred.isValid());
+        assertEquals(2026, inferred.getYear());
+        assertEquals(10, inferred.getMonth());
+        assertEquals(31, inferred.getDays().size());
+    }
+
+    @Test
+    public void testCase20_RosterCsvParser_WithAutoRecoveredWorkbook() throws Exception {
+        // Verify RosterCsvParser handles the AutoRecovered XLSX file through ExcelRosterParser delegation
+        try (InputStream is = new FileInputStream(autoRecoveredFile)) {
+            RosterCsvParser.ParseResult result = RosterCsvParser.parse(is, autoRecoveredFile.getName(), 2026, 10);
+            assertTrue("RosterCsvParser must successfully parse AutoRecovered workbook", result.isValid());
+            assertTrue("Errors must be empty", result.errors.isEmpty());
+            assertNotNull("MonthlyRoster must not be null", result.roster);
+            assertEquals("MonthlyRoster must contain 31 days", 31, result.roster.getDays().size());
+            assertEquals("First day must be 1", 1, result.roster.getDays().get(0).getDayNumber());
+            assertEquals("First day date must be 2026-10-01", "2026-10-01", result.roster.getDays().get(0).getDate());
+            assertEquals("Last day date must be 2026-10-31", "2026-10-31", result.roster.getDays().get(30).getDate());
+        }
     }
 }
