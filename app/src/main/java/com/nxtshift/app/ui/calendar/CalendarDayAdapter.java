@@ -15,6 +15,8 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import com.nxtshift.app.R;
 import com.nxtshift.app.domain.Duty;
+import com.nxtshift.app.domain.DutyStatus;
+import com.nxtshift.app.domain.ShiftType;
 import com.nxtshift.app.util.DateTimeUtils;
 
 import java.time.LocalDate;
@@ -27,6 +29,23 @@ public class CalendarDayAdapter extends RecyclerView.Adapter<CalendarDayAdapter.
 
     public interface OnDayClickListener {
         void onDayClick(LocalDate date);
+    }
+
+    public enum DayDutyVisualState {
+        NONE,
+        OFF,
+        LEAVE,
+        WORKING
+    }
+
+    public static class DayVisualResolution {
+        public final DayDutyVisualState state;
+        public final Duty primaryDuty;
+
+        public DayVisualResolution(DayDutyVisualState state, Duty primaryDuty) {
+            this.state = state;
+            this.primaryDuty = primaryDuty;
+        }
     }
 
     public static class DayItem {
@@ -44,7 +63,7 @@ public class CalendarDayAdapter extends RecyclerView.Adapter<CalendarDayAdapter.
     }
 
     private final List<DayItem> days = new ArrayList<>();
-    private final Map<String, Duty> dutyMapByDate = new HashMap<>();
+    private final Map<String, List<Duty>> dutyMapByDate = new HashMap<>();
     private final OnDayClickListener listener;
     private LocalDate selectedDate = LocalDate.now();
 
@@ -65,7 +84,10 @@ public class CalendarDayAdapter extends RecyclerView.Adapter<CalendarDayAdapter.
         this.dutyMapByDate.clear();
         if (duties != null) {
             for (Duty d : duties) {
-                this.dutyMapByDate.put(d.getDutyDate(), d);
+                if (d.getDutyDate() != null) {
+                    List<Duty> list = this.dutyMapByDate.computeIfAbsent(d.getDutyDate(), k -> new ArrayList<>());
+                    list.add(d);
+                }
             }
         }
         notifyDataSetChanged();
@@ -77,6 +99,46 @@ public class CalendarDayAdapter extends RecyclerView.Adapter<CalendarDayAdapter.
             item.isSelected = (item.date != null && item.date.isEqual(date));
         }
         notifyDataSetChanged();
+    }
+
+    public static boolean isLeaveDuty(Duty duty) {
+        if (duty == null) return false;
+        return duty.getShiftType() == ShiftType.LEAVE || duty.getStatus() == DutyStatus.LEAVE;
+    }
+
+    public static boolean isOffDuty(Duty duty) {
+        if (duty == null) return false;
+        return duty.getShiftType() == ShiftType.OFF || duty.getStatus() == DutyStatus.OFF;
+    }
+
+    public static DayVisualResolution resolveDayDuties(List<Duty> duties) {
+        if (duties == null || duties.isEmpty()) {
+            return new DayVisualResolution(DayDutyVisualState.NONE, null);
+        }
+
+        Duty workingDuty = null;
+        Duty leaveDuty = null;
+        Duty offDuty = null;
+
+        for (Duty d : duties) {
+            if (isLeaveDuty(d)) {
+                if (leaveDuty == null) leaveDuty = d;
+            } else if (isOffDuty(d)) {
+                if (offDuty == null) offDuty = d;
+            } else {
+                if (workingDuty == null) workingDuty = d;
+            }
+        }
+
+        if (workingDuty != null) {
+            return new DayVisualResolution(DayDutyVisualState.WORKING, workingDuty);
+        } else if (leaveDuty != null) {
+            return new DayVisualResolution(DayDutyVisualState.LEAVE, leaveDuty);
+        } else if (offDuty != null) {
+            return new DayVisualResolution(DayDutyVisualState.OFF, offDuty);
+        } else {
+            return new DayVisualResolution(DayDutyVisualState.NONE, null);
+        }
     }
 
     @NonNull
@@ -100,20 +162,25 @@ public class CalendarDayAdapter extends RecyclerView.Adapter<CalendarDayAdapter.
     static class DayViewHolder extends RecyclerView.ViewHolder {
         private final TextView tvDayNumber;
         private final View viewShiftDot;
+        private final TextView tvLeaveIndicator;
 
         public DayViewHolder(@NonNull View itemView) {
             super(itemView);
             tvDayNumber = itemView.findViewById(R.id.tvDayNumber);
             viewShiftDot = itemView.findViewById(R.id.viewShiftDot);
+            tvLeaveIndicator = itemView.findViewById(R.id.tvLeaveIndicator);
         }
 
         public void bind(final DayItem item,
-                         final Map<String, Duty> dutyMap,
+                         final Map<String, List<Duty>> dutyMap,
                          final LocalDate selectedDate,
                          final OnDayClickListener listener) {
             if (item.date == null) {
                 tvDayNumber.setText("");
                 viewShiftDot.setVisibility(View.INVISIBLE);
+                if (tvLeaveIndicator != null) {
+                    tvLeaveIndicator.setVisibility(View.GONE);
+                }
                 itemView.setOnClickListener(null);
                 return;
             }
@@ -142,16 +209,43 @@ public class CalendarDayAdapter extends RecyclerView.Adapter<CalendarDayAdapter.
                 tvDayNumber.setTypeface(null, Typeface.NORMAL);
             }
 
-            // Check if there is a duty on this date
+            // Check duties on this date and resolve visual state
             String isoDate = DateTimeUtils.toIsoDate(item.date);
-            Duty duty = dutyMap.get(isoDate);
+            List<Duty> duties = dutyMap != null ? dutyMap.get(isoDate) : null;
+            DayVisualResolution resolution = resolveDayDuties(duties);
 
-            if (duty != null) {
-                viewShiftDot.setVisibility(View.VISIBLE);
-                int dotColor = ContextCompat.getColor(context, duty.getShiftType().getColorRes());
-                viewShiftDot.setBackgroundTintList(ColorStateList.valueOf(dotColor));
-            } else {
-                viewShiftDot.setVisibility(View.INVISIBLE);
+            switch (resolution.state) {
+                case WORKING:
+                    viewShiftDot.setVisibility(View.VISIBLE);
+                    if (tvLeaveIndicator != null) {
+                        tvLeaveIndicator.setVisibility(View.GONE);
+                    }
+                    int dotColor = ContextCompat.getColor(context, resolution.primaryDuty.getShiftType().getColorRes());
+                    viewShiftDot.setBackgroundTintList(ColorStateList.valueOf(dotColor));
+                    break;
+                case LEAVE:
+                    viewShiftDot.setVisibility(View.GONE);
+                    if (tvLeaveIndicator != null) {
+                        tvLeaveIndicator.setVisibility(View.VISIBLE);
+                        tvLeaveIndicator.setText("L");
+                        tvLeaveIndicator.setTextColor(ContextCompat.getColor(context, R.color.shift_off));
+                    }
+                    break;
+                case OFF:
+                    // Requirement 1: Off date displayed with white background, no red dot
+                    viewShiftDot.setVisibility(View.INVISIBLE);
+                    if (tvLeaveIndicator != null) {
+                        tvLeaveIndicator.setVisibility(View.GONE);
+                    }
+                    break;
+                case NONE:
+                default:
+                    // Unscheduled / no entry date: clean cell, no dot, no leave indicator
+                    viewShiftDot.setVisibility(View.INVISIBLE);
+                    if (tvLeaveIndicator != null) {
+                        tvLeaveIndicator.setVisibility(View.GONE);
+                    }
+                    break;
             }
 
             itemView.setOnClickListener(v -> {
@@ -162,3 +256,4 @@ public class CalendarDayAdapter extends RecyclerView.Adapter<CalendarDayAdapter.
         }
     }
 }
+

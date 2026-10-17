@@ -14,6 +14,7 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import com.nxtshift.app.R;
 import com.nxtshift.app.domain.Duty;
+import com.nxtshift.app.domain.DutyStatus;
 import com.nxtshift.app.domain.ShiftType;
 import com.nxtshift.app.util.DateTimeUtils;
 
@@ -27,6 +28,7 @@ public class DutyAdapter extends RecyclerView.Adapter<DutyAdapter.DutyViewHolder
     }
 
     private final List<Duty> dutyList = new ArrayList<>();
+
     private final OnDutyClickListener clickListener;
 
     public DutyAdapter(OnDutyClickListener clickListener) {
@@ -80,20 +82,46 @@ public class DutyAdapter extends RecyclerView.Adapter<DutyAdapter.DutyViewHolder
         public void bind(final Duty duty, final OnDutyClickListener listener) {
             Context context = itemView.getContext();
             ShiftType shiftType = duty.getShiftType();
+            DutyStatus status = duty.getStatus();
+            boolean isOff = (shiftType == ShiftType.OFF || status == DutyStatus.OFF);
+            boolean isLeave = (shiftType == ShiftType.LEAVE || status == DutyStatus.LEAVE);
 
-            // Set color bar and badge
-            int colorRes = ContextCompat.getColor(context, shiftType.getColorRes());
-            int bgRes = ContextCompat.getColor(context, shiftType.getBgRes());
-            int textRes = ContextCompat.getColor(context, shiftType.getTextRes());
+            if (isOff) {
+                // Off day: neutral styling and explicit "Off" status
+                viewShiftColorIndicator.setBackgroundColor(ContextCompat.getColor(context, R.color.border_light));
+                badgeShiftType.setBackgroundTintList(ColorStateList.valueOf(ContextCompat.getColor(context, R.color.bg_light)));
+                badgeShiftType.setTextColor(ContextCompat.getColor(context, R.color.text_secondary));
+                badgeShiftType.setText("Off");
 
-            viewShiftColorIndicator.setBackgroundColor(colorRes);
-            badgeShiftType.setBackgroundTintList(ColorStateList.valueOf(bgRes));
-            badgeShiftType.setTextColor(textRes);
-            badgeShiftType.setText(duty.getShiftName());
+                tvDutyDate.setText(DateTimeUtils.formatDisplayDate(duty.getDutyDate()));
+                tvDutyTime.setText("Off");
+            } else if (isLeave) {
+                // Leave day: red badge and explicit "Leave" status
+                int colorRes = ContextCompat.getColor(context, shiftType.getColorRes());
+                int bgRes = ContextCompat.getColor(context, shiftType.getBgRes());
+                int textRes = ContextCompat.getColor(context, shiftType.getTextRes());
 
-            // Date & Time
-            tvDutyDate.setText(DateTimeUtils.formatDisplayDate(duty.getDutyDate()));
-            tvDutyTime.setText(duty.getFormattedDutyTime());
+                viewShiftColorIndicator.setBackgroundColor(colorRes);
+                badgeShiftType.setBackgroundTintList(ColorStateList.valueOf(bgRes));
+                badgeShiftType.setTextColor(textRes);
+                badgeShiftType.setText("Leave");
+
+                tvDutyDate.setText(DateTimeUtils.formatDisplayDate(duty.getDutyDate()));
+                tvDutyTime.setText("Leave");
+            } else {
+                // Working shift: preserve duty colors and shift name/times
+                int colorRes = ContextCompat.getColor(context, shiftType.getColorRes());
+                int bgRes = ContextCompat.getColor(context, shiftType.getBgRes());
+                int textRes = ContextCompat.getColor(context, shiftType.getTextRes());
+
+                viewShiftColorIndicator.setBackgroundColor(colorRes);
+                badgeShiftType.setBackgroundTintList(ColorStateList.valueOf(bgRes));
+                badgeShiftType.setTextColor(textRes);
+                badgeShiftType.setText(duty.getShiftName());
+
+                tvDutyDate.setText(DateTimeUtils.formatDisplayDate(duty.getDutyDate()));
+                tvDutyTime.setText(duty.getFormattedDutyTime());
+            }
 
             // Ward & Colleagues Snippet
             StringBuilder meta = new StringBuilder();
@@ -104,7 +132,13 @@ public class DutyAdapter extends RecyclerView.Adapter<DutyAdapter.DutyViewHolder
                 if (meta.length() > 0) meta.append(" · ");
                 meta.append("With: ").append(duty.getColleagues());
             }
-            if (meta.length() == 0) {
+            if (isOff) {
+                if (meta.length() > 0) meta.append(" · ");
+                meta.append("Status: Off");
+            } else if (isLeave) {
+                if (meta.length() > 0) meta.append(" · ");
+                meta.append("Status: Leave");
+            } else if (meta.length() == 0) {
                 meta.append(duty.getStatus().getLabel());
             }
             tvDutyMeta.setText(meta.toString());
@@ -147,6 +181,7 @@ public class DutyAdapter extends RecyclerView.Adapter<DutyAdapter.DutyViewHolder
             Duty n = newList.get(newItemPosition);
             return o.getDutyDate().equals(n.getDutyDate()) &&
                     o.getShiftType() == n.getShiftType() &&
+                    o.getStatus() == n.getStatus() &&
                     o.getFormattedDutyTime().equals(n.getFormattedDutyTime()) &&
                     o.getUpdatedAt() == n.getUpdatedAt();
         }
