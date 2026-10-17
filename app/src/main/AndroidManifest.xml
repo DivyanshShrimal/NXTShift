@@ -76,6 +76,10 @@
             android:exported="false" />
 
         <activity
+            android:name=".excel.ExcelRosterImportActivity"
+            android:exported="false" />
+
+        <activity
             android:name=".ui.admin.AdminDashboardActivity"
             android:exported="false" />
 
