@@ -42,12 +42,16 @@
     <!-- Email Verification Screen -->
     <string name="verify_email_title">Verify Your Email</string>
     <string name="msg_verification_sent_to">A verification link has been sent to:\n%1$s</string>
-    <string name="verify_email_instructions">Open the email and tap the link to verify your account, then return here and tap the button below.</string>
+    <string name="verify_email_instructions">Tap the link in the verification email to activate your account. If it doesn\'t appear in your inbox, please check your Spam or Junk folder.</string>
+    <string name="btn_open_email_app">Open Email App</string>
     <string name="btn_ive_verified">I\'ve Verified — Continue</string>
     <string name="btn_resend_verification">Resend Verification Email</string>
     <string name="resend_countdown">Resend in %1$ds</string>
-    <string name="msg_email_not_yet_verified">Email not yet verified. Please check your inbox and tap the verification link, then try again.</string>
-    <string name="msg_verification_resent">Verification email resent. Please check your inbox.</string>
+    <string name="msg_email_not_yet_verified">Email not yet verified. Please check your inbox and Spam folder, tap the link, then try again.</string>
+    <string name="msg_verification_resent">Verification email resent. Please check your inbox and Spam folder.</string>
+    <string name="msg_check_email_client">Please open your email app to verify your account.</string>
+    <string name="spam_notice_title">Can\'t find the email in your inbox?</string>
+    <string name="spam_notice_desc">Verification emails from automated services often land in Gmail\'s Spam or Junk folder. If found there, tap \"Report not spam\" or move it to your inbox so you don\'t miss future shift updates.</string>
     <string name="err_resend_failed">Could not resend: %1$s</string>
     <string name="msg_cancel_and_sign_out">Cancel registration and sign out</string>
 

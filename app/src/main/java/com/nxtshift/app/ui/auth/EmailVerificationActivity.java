@@ -1,6 +1,7 @@
 package com.nxtshift.app.ui.auth;
 
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.CountDownTimer;
 import android.view.View;
@@ -18,7 +19,7 @@ import com.nxtshift.app.ui.dashboard.DashboardActivity;
 /**
  * Email-verification holding screen shown immediately after registration.
  * Instructs the user to open their inbox, click the link, then tap "I've Verified".
- * Also offers a resend button (with 60-second cooldown) and sign-out.
+ * Also offers an open-email-app button, resend button (with 60-second cooldown), and spam guidance.
  */
 public class EmailVerificationActivity extends AppCompatActivity {
 
@@ -47,6 +48,8 @@ public class EmailVerificationActivity extends AppCompatActivity {
 
         binding.tvEmailAddress.setText(
                 getString(R.string.msg_verification_sent_to, user.getEmail()));
+
+        binding.btnOpenEmailApp.setOnClickListener(v -> openEmailApp());
 
         binding.btnVerified.setOnClickListener(v -> checkVerification());
 
@@ -166,9 +169,27 @@ public class EmailVerificationActivity extends AppCompatActivity {
         }.start();
     }
 
+    private void openEmailApp() {
+        Intent intent = new Intent(Intent.ACTION_MAIN);
+        intent.addCategory(Intent.CATEGORY_APP_EMAIL);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(intent);
+        } catch (Exception e) {
+            try {
+                Intent mailtoIntent = new Intent(Intent.ACTION_SENDTO);
+                mailtoIntent.setData(Uri.parse("mailto:"));
+                startActivity(Intent.createChooser(mailtoIntent, getString(R.string.btn_open_email_app)));
+            } catch (Exception ex) {
+                Toast.makeText(this, R.string.msg_check_email_client, Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+
     private void setLoading(boolean isLoading) {
         binding.progressBar.setVisibility(isLoading ? View.VISIBLE : View.GONE);
         binding.btnVerified.setEnabled(!isLoading);
+        binding.btnOpenEmailApp.setEnabled(!isLoading);
     }
 
     @Override

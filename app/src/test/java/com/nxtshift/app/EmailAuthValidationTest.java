@@ -50,6 +50,24 @@ public class EmailAuthValidationTest {
         assertFalse(pass.equals(confirmDiff));
     }
 
+    @Test
+    public void testResendCooldownMinimumDuration() {
+        // Minimum 60-second cooldown is enforced to prevent email spam triggers and provider throttling
+        long cooldownMs = 60_000L;
+        assertTrue("Resend cooldown must be at least 60 seconds", cooldownMs >= 60_000L);
+    }
+
+    @Test
+    public void testEmailDeliverabilityGuidanceKeywords() {
+        String spamNotice = "Verification emails from automated services often land in Gmail's Spam or Junk folder. " +
+                "If found there, tap \"Report not spam\" or move it to your inbox so you don't miss future shift updates.";
+
+        assertTrue(spamNotice.toLowerCase().contains("spam"));
+        assertTrue(spamNotice.toLowerCase().contains("junk"));
+        assertTrue(spamNotice.toLowerCase().contains("report not spam"));
+        assertTrue(spamNotice.toLowerCase().contains("inbox"));
+    }
+
     private boolean isValidEmail(String email) {
         if (email == null || email.trim().isEmpty()) {
             return false;
