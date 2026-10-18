@@ -152,6 +152,16 @@ public class CentralRosterService {
      * Admin action: Saves roster draft without publishing.
      */
     public void saveDraftRoster(@NonNull MonthlyRoster roster, @NonNull final Callback<Void> callback) {
+        db.collection("app_control").document("global").get().addOnSuccessListener(globalDoc -> {
+            if (globalDoc != null && globalDoc.exists() && Boolean.FALSE.equals(globalDoc.getBoolean("enabled"))) {
+                postError(callback, new IllegalStateException("Draft save blocked: Application is in global maintenance mode."));
+                return;
+            }
+            executeSaveDraftRoster(roster, callback);
+        }).addOnFailureListener(e -> executeSaveDraftRoster(roster, callback));
+    }
+
+    private void executeSaveDraftRoster(@NonNull MonthlyRoster roster, @NonNull final Callback<Void> callback) {
         String draftId = MonthlyRoster.formatRosterId(roster.getYear(), roster.getMonth()) + "_draft";
         roster.setId(draftId);
         roster.setStatus(MonthlyRoster.STATUS_DRAFT);
@@ -171,6 +181,19 @@ public class CentralRosterService {
                               String publishedByUid,
                               String publishedByEmail,
                               @NonNull final Callback<Integer> callback) {
+        db.collection("app_control").document("global").get().addOnSuccessListener(globalDoc -> {
+            if (globalDoc != null && globalDoc.exists() && Boolean.FALSE.equals(globalDoc.getBoolean("enabled"))) {
+                postError(callback, new IllegalStateException("Publication blocked: Application is in global maintenance mode."));
+                return;
+            }
+            executePublishRoster(roster, publishedByUid, publishedByEmail, callback);
+        }).addOnFailureListener(e -> executePublishRoster(roster, publishedByUid, publishedByEmail, callback));
+    }
+
+    private void executePublishRoster(@NonNull MonthlyRoster roster,
+                                     String publishedByUid,
+                                     String publishedByEmail,
+                                     @NonNull final Callback<Integer> callback) {
         final String pubId = MonthlyRoster.formatRosterId(roster.getYear(), roster.getMonth());
         final DocumentReference docRef = db.collection(COLLECTION_MONTHLY_ROSTERS).document(pubId);
 

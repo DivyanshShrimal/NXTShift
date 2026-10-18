@@ -13,6 +13,7 @@ import com.google.firebase.firestore.ListenerRegistration;
 import com.nxtshift.app.data.local.DutyDao;
 import com.nxtshift.app.data.local.DutyEntity;
 import com.nxtshift.app.data.local.NXTShiftDatabase;
+import com.nxtshift.app.data.model.AccessState;
 import com.nxtshift.app.data.remote.FirestoreService;
 import com.nxtshift.app.domain.Duty;
 import com.nxtshift.app.domain.SyncStatus;
@@ -40,6 +41,7 @@ public class DutyRepository {
     private final FirestoreService firestoreService;
     private final ExecutorService diskExecutor;
     private final Handler mainHandler;
+    private AccessControlRepository accessControlRepository;
     private ListenerRegistration activeFirestoreListener;
 
     public interface RepositoryCallback<T> {
@@ -53,7 +55,8 @@ public class DutyRepository {
                 if (INSTANCE == null) {
                     INSTANCE = new DutyRepository(
                             NXTShiftDatabase.getInstance(context).dutyDao(),
-                            new FirestoreService()
+                            new FirestoreService(),
+                            AccessControlRepository.getInstance(context)
                     );
                 }
             }
@@ -62,10 +65,23 @@ public class DutyRepository {
     }
 
     public DutyRepository(DutyDao dutyDao, FirestoreService firestoreService) {
+        this(dutyDao, firestoreService, null);
+    }
+
+    public DutyRepository(DutyDao dutyDao, FirestoreService firestoreService, AccessControlRepository accessControlRepository) {
         this.dutyDao = dutyDao;
         this.firestoreService = firestoreService;
+        this.accessControlRepository = accessControlRepository;
         this.diskExecutor = Executors.newSingleThreadExecutor();
         this.mainHandler = new Handler(Looper.getMainLooper());
+    }
+
+    public void setAccessControlRepository(AccessControlRepository accessControlRepository) {
+        this.accessControlRepository = accessControlRepository;
+    }
+
+    public AccessControlRepository getAccessControlRepository() {
+        return accessControlRepository;
     }
 
     // --- Observable Queries Isolated by Owner UID ---
@@ -147,32 +163,50 @@ public class DutyRepository {
                     mainHandler.post(() -> callback.onComplete(duty));
                 }
 
-                // 2. Upload to Firestore
-                firestoreService.uploadDuty(duty, new FirestoreService.FirestoreCallback<Void>() {
-                    @Override
-                    public void onSuccess(Void result) {
-                        diskExecutor.execute(() -> {
-                            duty.setSyncStatus(SyncStatus.SYNCED);
-                            dutyDao.update(DutyEntity.fromDomain(duty, duty.getOwnerUid()));
-                            Log.d(TAG, "Duty synced to Firestore: " + duty.getId());
-                        });
-                    }
+                // 2. Check access before uploading to Firestore
+                if (accessControlRepository != null) {
+                    accessControlRepository.checkCloudAccess(new AccessControlRepository.AccessCheckCallback() {
+                        @Override
+                        public void onAllowed() {
+                            uploadDutyToFirestore(duty);
+                        }
 
-                    @Override
-                    public void onError(Exception e) {
-                        Log.w(TAG, "Duty upload pending network: " + e.getMessage());
-                        diskExecutor.execute(() -> {
-                            duty.setSyncStatus(SyncStatus.PENDING_UPLOAD);
-                            dutyDao.update(DutyEntity.fromDomain(duty, duty.getOwnerUid()));
-                        });
-                    }
-                });
+                        @Override
+                        public void onBlocked(AccessState state, String message) {
+                            Log.w(TAG, "Duty upload blocked by access control: " + state + " - " + message);
+                        }
+                    });
+                } else {
+                    uploadDutyToFirestore(duty);
+                }
 
             } catch (Exception e) {
                 Log.e(TAG, "Error saving duty locally", e);
                 if (callback != null) {
                     mainHandler.post(() -> callback.onError(e));
                 }
+            }
+        });
+    }
+
+    private void uploadDutyToFirestore(final Duty duty) {
+        firestoreService.uploadDuty(duty, new FirestoreService.FirestoreCallback<Void>() {
+            @Override
+            public void onSuccess(Void result) {
+                diskExecutor.execute(() -> {
+                    duty.setSyncStatus(SyncStatus.SYNCED);
+                    dutyDao.update(DutyEntity.fromDomain(duty, duty.getOwnerUid()));
+                    Log.d(TAG, "Duty synced to Firestore: " + duty.getId());
+                });
+            }
+
+            @Override
+            public void onError(Exception e) {
+                Log.w(TAG, "Duty upload pending network: " + e.getMessage());
+                diskExecutor.execute(() -> {
+                    duty.setSyncStatus(SyncStatus.PENDING_UPLOAD);
+                    dutyDao.update(DutyEntity.fromDomain(duty, duty.getOwnerUid()));
+                });
             }
         });
     }
@@ -186,21 +220,39 @@ public class DutyRepository {
                     mainHandler.post(() -> callback.onComplete(null));
                 }
 
-                firestoreService.deleteDuty(duty.getId(), duty.getOwnerUid(), new FirestoreService.FirestoreCallback<Void>() {
-                    @Override
-                    public void onSuccess(Void result) {
-                        Log.d(TAG, "Deleted duty from Firestore: " + duty.getId());
-                    }
+                if (accessControlRepository != null) {
+                    accessControlRepository.checkCloudAccess(new AccessControlRepository.AccessCheckCallback() {
+                        @Override
+                        public void onAllowed() {
+                            deleteDutyFromFirestore(duty);
+                        }
 
-                    @Override
-                    public void onError(Exception e) {
-                        Log.w(TAG, "Could not delete from Firestore immediately: " + e.getMessage());
-                    }
-                });
+                        @Override
+                        public void onBlocked(AccessState state, String message) {
+                            Log.w(TAG, "Duty deletion from cloud blocked by access control: " + state + " - " + message);
+                        }
+                    });
+                } else {
+                    deleteDutyFromFirestore(duty);
+                }
             } catch (Exception e) {
                 if (callback != null) {
                     mainHandler.post(() -> callback.onError(e));
                 }
+            }
+        });
+    }
+
+    private void deleteDutyFromFirestore(final Duty duty) {
+        firestoreService.deleteDuty(duty.getId(), duty.getOwnerUid(), new FirestoreService.FirestoreCallback<Void>() {
+            @Override
+            public void onSuccess(Void result) {
+                Log.d(TAG, "Deleted duty from Firestore: " + duty.getId());
+            }
+
+            @Override
+            public void onError(Exception e) {
+                Log.w(TAG, "Could not delete from Firestore immediately: " + e.getMessage());
             }
         });
     }
@@ -354,6 +406,32 @@ public class DutyRepository {
             return;
         }
 
+        if (accessControlRepository != null) {
+            accessControlRepository.checkCloudAccess(new AccessControlRepository.AccessCheckCallback() {
+                @Override
+                public void onAllowed() {
+                    executeCloudSync(ownerUid, callback);
+                }
+
+                @Override
+                public void onBlocked(AccessState state, String message) {
+                    if (callback != null) {
+                        SecurityException ex = new SecurityException("Cloud sync blocked by access control: " + state + " - " + message);
+                        if (mainHandler == null || Looper.getMainLooper() == null) {
+                            callback.onError(ex);
+                        } else {
+                            mainHandler.post(() -> callback.onError(ex));
+                        }
+                    }
+                }
+            });
+            return;
+        }
+
+        executeCloudSync(ownerUid, callback);
+    }
+
+    private void executeCloudSync(final String ownerUid, final RepositoryCallback<Boolean> callback) {
         diskExecutor.execute(() -> {
             // 1. Upload pending changes first
             List<DutyEntity> pending = dutyDao.getPendingUploadDuties(ownerUid);
@@ -419,6 +497,11 @@ public class DutyRepository {
     public void startListeningToCloudUpdates(final String ownerUid) {
         stopListeningToCloudUpdates();
         if (ownerUid == null || ownerUid.isEmpty()) return;
+
+        if (accessControlRepository != null && accessControlRepository.getCurrentAccessState() != AccessState.ALLOWED) {
+            Log.w(TAG, "Cloud listening suspended: access state is " + accessControlRepository.getCurrentAccessState());
+            return;
+        }
 
         activeFirestoreListener = firestoreService.listenToDuties(ownerUid, new FirestoreService.FirestoreCallback<List<Duty>>() {
             @Override
