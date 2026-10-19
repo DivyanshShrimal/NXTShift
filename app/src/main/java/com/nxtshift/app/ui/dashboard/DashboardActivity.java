@@ -31,9 +31,6 @@ import com.nxtshift.app.ui.importroster.PublishedRosterImportActivity;
 import com.nxtshift.app.ui.importroster.RosterImportActivity;
 import com.nxtshift.app.excel.ExcelRosterImportActivity;
 import com.nxtshift.app.ui.settings.SettingsActivity;
-import com.nxtshift.app.data.model.AccessState;
-import com.nxtshift.app.data.repository.AccessControlRepository;
-import com.nxtshift.app.ui.access.AccessRestrictedActivity;
 import com.nxtshift.app.util.DateTimeUtils;
 
 public class DashboardActivity extends AppCompatActivity {
@@ -45,8 +42,6 @@ public class DashboardActivity extends AppCompatActivity {
     private DutyAdapter dutyAdapter;
 
     private String currentUid;
-    private AccessControlRepository accessControlRepository;
-    private boolean isRestrictedScreenShown = false;
     private Duty todayDuty;
     private Duty tomorrowDuty;
 
@@ -71,8 +66,7 @@ public class DashboardActivity extends AppCompatActivity {
 
         currentUid = authRepository.getCurrentUid();
         dutyRepository = DutyRepository.getInstance(this);
-        accessControlRepository = AccessControlRepository.getInstance(this);
-        centralRosterService = new CentralRosterService(accessControlRepository);
+        centralRosterService = new CentralRosterService();
 
         binding = ActivityDashboardBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
@@ -82,30 +76,10 @@ public class DashboardActivity extends AppCompatActivity {
         observeDutyData();
         checkNotificationPermission();
         checkAdminStatus();
-        observeAccessControl();
-    }
 
-    private void observeAccessControl() {
-        accessControlRepository.startMonitoring(currentUid);
-        accessControlRepository.getAccessStateLiveData().observe(this, state -> {
-            if (state == AccessState.GLOBAL_DISABLED || state == AccessState.USER_REVOKED) {
-                dutyRepository.stopListeningToCloudUpdates();
-                binding.tvSyncStatus.setText(state == AccessState.GLOBAL_DISABLED ? "Maintenance Mode" : "Access Revoked");
-                binding.viewSyncDot.setBackgroundTintList(ColorStateList.valueOf(ContextCompat.getColor(this, R.color.status_error)));
-                if (!isRestrictedScreenShown) {
-                    isRestrictedScreenShown = true;
-                    Intent intent = new Intent(this, AccessRestrictedActivity.class);
-                    startActivity(intent);
-                }
-            } else if (state == AccessState.ALLOWED) {
-                isRestrictedScreenShown = false;
-                dutyRepository.startListeningToCloudUpdates(currentUid);
-                triggerSync();
-            } else if (state == AccessState.OFFLINE_UNVERIFIED) {
-                binding.tvSyncStatus.setText("Offline Cache");
-                binding.viewSyncDot.setBackgroundTintList(ColorStateList.valueOf(ContextCompat.getColor(this, R.color.status_pending)));
-            }
-        });
+        // Start live sync listener and initial sync
+        dutyRepository.startListeningToCloudUpdates(currentUid);
+        triggerSync();
     }
 
     private void checkAdminStatus() {
@@ -340,6 +314,5 @@ public class DashboardActivity extends AppCompatActivity {
     protected void onDestroy() {
         super.onDestroy();
         dutyRepository.stopListeningToCloudUpdates();
-        accessControlRepository.stopMonitoring();
     }
 }

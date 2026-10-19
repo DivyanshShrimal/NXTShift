@@ -13,8 +13,8 @@ import java.util.Set;
 
 /**
  * Unit test suite validating Firestore Security Rules predicates,
- * role-based administrative permissions, remote access control gates (global and per-user),
- * client privilege restrictions, and per-user data isolation.
+ * role-based administrative permissions, client privilege restrictions,
+ * and per-user data isolation.
  */
 public class FirestoreRulesSecurityTest {
 
@@ -23,20 +23,11 @@ public class FirestoreRulesSecurityTest {
         final String uid;
         final boolean hasAdminCustomClaim;
         final Set<String> adminCollectionUids;
-        Boolean globalEnabledDoc; // null if doc missing, true/false if present
-        Map<String, Boolean> userAccessDocs; // targetUid -> enabled (null if no doc)
 
         SecurityContext(String uid, boolean hasAdminCustomClaim, Set<String> adminCollectionUids) {
-            this(uid, hasAdminCustomClaim, adminCollectionUids, true, new HashMap<>());
-        }
-
-        SecurityContext(String uid, boolean hasAdminCustomClaim, Set<String> adminCollectionUids,
-                        Boolean globalEnabledDoc, Map<String, Boolean> userAccessDocs) {
             this.uid = uid;
             this.hasAdminCustomClaim = hasAdminCustomClaim;
             this.adminCollectionUids = adminCollectionUids != null ? adminCollectionUids : java.util.Collections.emptySet();
-            this.globalEnabledDoc = globalEnabledDoc;
-            this.userAccessDocs = userAccessDocs != null ? userAccessDocs : new HashMap<>();
         }
 
         boolean isAuthenticated() {
@@ -49,22 +40,6 @@ public class FirestoreRulesSecurityTest {
 
         boolean isAdmin() {
             return isAuthenticated() && (hasAdminCustomClaim || adminCollectionUids.contains(uid));
-        }
-
-        // Rule Evaluation: isGlobalEnabled()
-        boolean isGlobalEnabled() {
-            return globalEnabledDoc != null && globalEnabledDoc;
-        }
-
-        // Rule Evaluation: isUserAccessAllowed(uid)
-        boolean isUserAccessAllowed(String targetUid) {
-            Boolean record = userAccessDocs.get(targetUid);
-            return record == null || record;
-        }
-
-        // Rule Evaluation: isAccessPermitted(uid)
-        boolean isAccessPermitted(String targetUid) {
-            return isGlobalEnabled() && isUserAccessAllowed(targetUid);
         }
 
         // Rule Evaluation: /admins/{adminUid}
@@ -80,32 +55,9 @@ public class FirestoreRulesSecurityTest {
             return false; // allow write: if false;
         }
 
-        // Rule Evaluation: /app_control/global
-        boolean canGetGlobalControlDoc() {
-            return isAuthenticated();
-        }
-
-        boolean canWriteGlobalControlDoc() {
-            return isAdmin();
-        }
-
-        // Rule Evaluation: /app_access/{targetUid}
-        boolean canGetUserAccessDoc(String targetUid) {
-            return isAuthenticated() && (uid.equals(targetUid) || isAdmin());
-        }
-
-        boolean canListUserAccessDocs() {
-            return isAdmin();
-        }
-
-        boolean canWriteUserAccessDoc() {
-            return isAdmin();
-        }
-
         // Rule Evaluation: /monthly_rosters/{rosterId}
         boolean canGetMonthlyRoster(Map<String, Object> existingDocResource) {
             if (!isAuthenticated()) return false;
-            if (!isAccessPermitted(uid)) return false;
             if (isAdmin()) return true;
             if (existingDocResource == null) return true; // resource == null (check non-existence)
             Object status = existingDocResource.get("status");
@@ -114,18 +66,17 @@ public class FirestoreRulesSecurityTest {
 
         boolean canListMonthlyRosters(String queryFilterStatus) {
             if (!isAuthenticated()) return false;
-            if (!isAccessPermitted(uid)) return false;
             if (isAdmin()) return true;
             return "PUBLISHED".equals(queryFilterStatus);
         }
 
         boolean canCreateOrUpdateMonthlyRoster(Map<String, Object> data, String rosterId) {
-            if (!isAdmin() || !isAccessPermitted(uid)) return false;
+            if (!isAdmin()) return false;
             return isValidMonthlyRoster(data, rosterId, uid);
         }
 
         boolean canDeleteMonthlyRoster() {
-            return isAdmin() && isAccessPermitted(uid);
+            return isAdmin();
         }
 
         // Rule Validation: isValidMonthlyRoster(data, rosterId)
@@ -173,19 +124,19 @@ public class FirestoreRulesSecurityTest {
 
         // Rule Evaluation: /users/{targetUid}/duties/{dutyId}
         boolean canReadUserDuty(String targetUid) {
-            return isOwner(targetUid) && isAccessPermitted(targetUid);
+            return isOwner(targetUid);
         }
 
         boolean canCreateUserDuty(String targetUid, String dutyId, Map<String, Object> data) {
-            return isOwner(targetUid) && isAccessPermitted(targetUid) && isValidDutyData(data, targetUid) && dutyId.equals(data.get("id"));
+            return isOwner(targetUid) && isValidDutyData(data, targetUid) && dutyId.equals(data.get("id"));
         }
 
         boolean canUpdateUserDuty(String targetUid, Map<String, Object> existingData, Map<String, Object> newData) {
-            return isOwner(targetUid) && isAccessPermitted(targetUid) && isValidDutyData(newData, targetUid) && existingData.get("ownerUid").equals(newData.get("ownerUid"));
+            return isOwner(targetUid) && isValidDutyData(newData, targetUid) && existingData.get("ownerUid").equals(newData.get("ownerUid"));
         }
 
         boolean canDeleteUserDuty(String targetUid) {
-            return isOwner(targetUid) && isAccessPermitted(targetUid);
+            return isOwner(targetUid);
         }
     }
 
@@ -211,172 +162,174 @@ public class FirestoreRulesSecurityTest {
         adminUserViaClaim = new SecurityContext("admin_claim_uid", true, adminCollection);
     }
 
+    // ── 1. Admin Authorization Collection Tests (/admins/{adminUid}) ─────────────
+
     @Test
-    public void testAdminAccessVerification() {
-        assertTrue("Admin via collection has admin privileges", adminUserViaCollection.isAdmin());
-        assertTrue("Admin via claim has admin privileges", adminUserViaClaim.isAdmin());
-        assertFalse("Normal nurse does NOT have admin privileges", normalNurse.isAdmin());
-        assertFalse("Unauthenticated user does NOT have admin privileges", unauthenticatedUser.isAdmin());
+    public void testAdminCollection_WritesAlwaysDeniedForEveryone() {
+        assertFalse("Unauthenticated cannot write admin doc", unauthenticatedUser.canWriteAdminDoc());
+        assertFalse("Normal user cannot create admin doc", normalNurse.canWriteAdminDoc());
+        assertFalse("Even existing admin cannot write admin doc via client SDK", adminUserViaCollection.canWriteAdminDoc());
+        assertFalse("Token claim admin cannot write admin doc via client SDK", adminUserViaClaim.canWriteAdminDoc());
     }
 
     @Test
-    public void testAdminsCollection_WriteAlwaysForbidden() {
-        assertFalse("Admin cannot write to /admins via client", adminUserViaCollection.canWriteAdminDoc());
-        assertFalse("Nurse cannot write to /admins via client", normalNurse.canWriteAdminDoc());
-    }
+    public void testAdminCollection_UsersCanOnlyCheckTheirOwnDoc() {
+        // Normal user checking their own UID
+        assertTrue("User can check their own admin document", normalNurse.canGetAdminDoc(NURSE_A_UID));
 
-    // --- Remote Access Control Tests ---
+        // Normal user attempting to check another user's admin document
+        assertFalse("Normal user cannot inspect another user's admin document", normalNurse.canGetAdminDoc(NURSE_B_UID));
+        assertFalse("Normal user cannot inspect admin's document", normalNurse.canGetAdminDoc(ADMIN_UID));
 
-    @Test
-    public void testRemoteAccess_GlobalEnabledAndUserEnabled_Allowed() {
-        assertTrue("Nurse A can read own duties when global and user access enabled",
-                normalNurse.canReadUserDuty(NURSE_A_UID));
-    }
-
-    @Test
-    public void testRemoteAccess_GlobalDisabled_BlocksUserCloudOperations() {
-        normalNurse.globalEnabledDoc = false;
-        assertFalse("Nurse A CANNOT read cloud duties when global access is disabled",
-                normalNurse.canReadUserDuty(NURSE_A_UID));
-
-        Map<String, Object> duty = createValidDutyMap("duty_01", NURSE_A_UID);
-        assertFalse("Nurse A CANNOT create cloud duty when global access is disabled",
-                normalNurse.canCreateUserDuty(NURSE_A_UID, "duty_01", duty));
+        // Admin can inspect any admin document
+        assertTrue("Admin can check any admin document", adminUserViaCollection.canGetAdminDoc(NURSE_A_UID));
+        assertTrue("Admin can check another admin document", adminUserViaClaim.canGetAdminDoc(ADMIN_UID));
     }
 
     @Test
-    public void testRemoteAccess_GlobalMissing_FailsClosed() {
-        normalNurse.globalEnabledDoc = null; // document missing in Firestore
-        assertFalse("Missing /app_control/global fails closed for cloud duty reads",
-                normalNurse.canReadUserDuty(NURSE_A_UID));
+    public void testAdminCollection_NormalUsersCannotListAdmins() {
+        assertFalse("Normal users cannot list the admins collection", normalNurse.canListAdminDocs());
+        assertFalse("Unauthenticated users cannot list the admins collection", unauthenticatedUser.canListAdminDocs());
+        assertTrue("Admins can list the admins collection", adminUserViaCollection.canListAdminDocs());
+    }
+
+    // ── 2. Central Monthly Roster Tests (/monthly_rosters/{rosterId}) ─────────────
+
+    @Test
+    public void testMonthlyRoster_NormalUserCanReadPublishedOnly() {
+        Map<String, Object> publishedDoc = new HashMap<>();
+        publishedDoc.put("id", "2026_10");
+        publishedDoc.put("status", "PUBLISHED");
+
+        Map<String, Object> draftDoc = new HashMap<>();
+        draftDoc.put("id", "2026_10_draft");
+        draftDoc.put("status", "DRAFT");
+
+        // Published roster read
+        assertTrue("Normal user can read published roster", normalNurse.canGetMonthlyRoster(publishedDoc));
+        assertFalse("Unauthenticated user cannot read published roster", unauthenticatedUser.canGetMonthlyRoster(publishedDoc));
+
+        // Draft roster read (Must be denied for normal users)
+        assertFalse("Normal user CANNOT read draft roster", normalNurse.canGetMonthlyRoster(draftDoc));
+        assertTrue("Admin user CAN read draft roster", adminUserViaCollection.canGetMonthlyRoster(draftDoc));
+
+        // Non-existent document get (e.g. check if month is published)
+        assertTrue("Normal user checking non-existent document gets response without permission denial",
+                normalNurse.canGetMonthlyRoster(null));
     }
 
     @Test
-    public void testRemoteAccess_UserRevoked_OnlyRevokedUserIsBlocked() {
-        // Revoke Nurse A
-        normalNurse.userAccessDocs.put(NURSE_A_UID, false);
-        anotherNurse.userAccessDocs.put(NURSE_A_UID, false); // Nurse B shares same Firestore state
+    public void testMonthlyRoster_NormalUsersCannotPublishOrModify() {
+        Map<String, Object> validRoster = createValidRosterMap("2026_10", "PUBLISHED");
 
-        assertFalse("Revoked Nurse A cannot read cloud duties", normalNurse.canReadUserDuty(NURSE_A_UID));
-
-        Map<String, Object> dutyA = createValidDutyMap("duty_01", NURSE_A_UID);
-        assertFalse("Revoked Nurse A cannot write cloud duties",
-                normalNurse.canCreateUserDuty(NURSE_A_UID, "duty_01", dutyA));
-
-        // Nurse B is NOT revoked and must remain unaffected
-        assertTrue("Nurse B (unrevoked) CAN read own duties", anotherNurse.canReadUserDuty(NURSE_B_UID));
-        Map<String, Object> dutyB = createValidDutyMap("duty_02", NURSE_B_UID);
-        assertTrue("Nurse B (unrevoked) CAN write own duties",
-                anotherNurse.canCreateUserDuty(NURSE_B_UID, "duty_02", dutyB));
+        assertFalse("Normal user cannot create/publish roster", normalNurse.canCreateOrUpdateMonthlyRoster(validRoster, "2026_10"));
+        assertFalse("Normal user cannot delete roster", normalNurse.canDeleteMonthlyRoster());
+        assertFalse("Unauthenticated user cannot create/publish roster", unauthenticatedUser.canCreateOrUpdateMonthlyRoster(validRoster, "2026_10"));
     }
 
     @Test
-    public void testRemoteAccess_UserRestored_OperationsAllowed() {
-        // Revoke then restore
-        normalNurse.userAccessDocs.put(NURSE_A_UID, false);
-        assertFalse("Blocked while revoked", normalNurse.canReadUserDuty(NURSE_A_UID));
+    public void testMonthlyRoster_AdminCanCreateAndPublishValidRoster() {
+        Map<String, Object> validDraft = createValidRosterMap("2026_10_draft", "DRAFT");
+        Map<String, Object> validPublished = createValidRosterMap("2026_10", "PUBLISHED", ADMIN_UID);
+        Map<String, Object> validPublishedClaim = createValidRosterMap("2026_10", "PUBLISHED", "admin_claim_uid");
 
-        normalNurse.userAccessDocs.put(NURSE_A_UID, true);
-        assertTrue("Allowed once restored", normalNurse.canReadUserDuty(NURSE_A_UID));
+        assertTrue("Admin can save valid draft", adminUserViaCollection.canCreateOrUpdateMonthlyRoster(validDraft, "2026_10_draft"));
+        assertTrue("Admin can publish valid roster", adminUserViaCollection.canCreateOrUpdateMonthlyRoster(validPublished, "2026_10"));
+        assertTrue("Claim-based admin can publish valid roster", adminUserViaClaim.canCreateOrUpdateMonthlyRoster(validPublishedClaim, "2026_10"));
+        assertTrue("Admin can delete draft after publishing", adminUserViaCollection.canDeleteMonthlyRoster());
     }
 
     @Test
-    public void testRemoteAccess_ControlDocuments_WriteAuthorization() {
-        // Only admin can write to /app_control/global
-        assertTrue("Admin can write global control doc", adminUserViaCollection.canWriteGlobalControlDoc());
-        assertFalse("Normal nurse CANNOT write global control doc", normalNurse.canWriteGlobalControlDoc());
-        assertFalse("Unauthenticated user CANNOT write global control doc", unauthenticatedUser.canWriteGlobalControlDoc());
+    public void testMonthlyRoster_EnforcesPublishedByUidMatchesAuthUid() {
+        // Correct publishedByUid matching authenticated admin UID
+        Map<String, Object> validPublished = createValidRosterMap("2026_10", "PUBLISHED", ADMIN_UID);
+        assertTrue("Publishing succeeds when publishedByUid == request.auth.uid",
+                adminUserViaCollection.canCreateOrUpdateMonthlyRoster(validPublished, "2026_10"));
 
-        // Only admin can write to /app_access/{uid}
-        assertTrue("Admin can write user access doc", adminUserViaCollection.canWriteUserAccessDoc());
-        assertFalse("Normal nurse CANNOT write to their own access doc", normalNurse.canWriteUserAccessDoc());
-        assertFalse("Normal nurse CANNOT write to another user's access doc", normalNurse.canWriteUserAccessDoc());
-
-        // Any authenticated user can read global config
-        assertTrue("Nurse can get global control doc", normalNurse.canGetGlobalControlDoc());
-        assertFalse("Unauthenticated user cannot get global control doc", unauthenticatedUser.canGetGlobalControlDoc());
-
-        // User can only get their own access doc; admin can get any
-        assertTrue("Nurse A can get own access doc", normalNurse.canGetUserAccessDoc(NURSE_A_UID));
-        assertFalse("Nurse A CANNOT get Nurse B access doc", normalNurse.canGetUserAccessDoc(NURSE_B_UID));
-        assertTrue("Admin can get Nurse A access doc", adminUserViaCollection.canGetUserAccessDoc(NURSE_A_UID));
+        // Spoofed publishedByUid (e.g. admin tries to set publishedByUid to another user's UID)
+        Map<String, Object> spoofedPublisher = createValidRosterMap("2026_10", "PUBLISHED", "another_admin_uid");
+        assertFalse("Publishing is rejected when publishedByUid != request.auth.uid",
+                adminUserViaCollection.canCreateOrUpdateMonthlyRoster(spoofedPublisher, "2026_10"));
     }
 
     @Test
-    public void testRemoteAccess_AdminRosterPublishingBlockedWhenGlobalDisabled() {
-        Map<String, Object> draft = createValidRosterMap("2026_10_draft", "DRAFT");
-        Map<String, Object> published = createValidRosterMap("2026_10", "PUBLISHED");
+    public void testMonthlyRoster_SchemaValidationRejectsInvalidDataEvenForAdmin() {
+        // Mismatched ID
+        Map<String, Object> mismatchedId = createValidRosterMap("2026_10", "PUBLISHED");
+        assertFalse("Rejects mismatched document ID and data.id",
+                adminUserViaCollection.canCreateOrUpdateMonthlyRoster(mismatchedId, "2026_11"));
 
-        // Enabled -> Admin can mutate
-        assertTrue("Admin can save draft when global enabled",
-                adminUserViaCollection.canCreateOrUpdateMonthlyRoster(draft, "2026_10_draft"));
-        assertTrue("Admin can publish when global enabled",
-                adminUserViaCollection.canCreateOrUpdateMonthlyRoster(published, "2026_10"));
+        // Invalid month (< 1 or > 12)
+        Map<String, Object> invalidMonth = createValidRosterMap("2026_13", "PUBLISHED");
+        invalidMonth.put("month", 13);
+        assertFalse("Rejects month > 12", adminUserViaCollection.canCreateOrUpdateMonthlyRoster(invalidMonth, "2026_13"));
 
-        // Disabled -> Admin mutations blocked
-        adminUserViaCollection.globalEnabledDoc = false;
-        assertFalse("Admin CANNOT save draft when global access is disabled",
-                adminUserViaCollection.canCreateOrUpdateMonthlyRoster(draft, "2026_10_draft"));
-        assertFalse("Admin CANNOT publish roster when global access is disabled",
-                adminUserViaCollection.canCreateOrUpdateMonthlyRoster(published, "2026_10"));
-        assertFalse("Admin CANNOT delete roster when global access is disabled",
-                adminUserViaCollection.canDeleteMonthlyRoster());
+        // Invalid status
+        Map<String, Object> invalidStatus = createValidRosterMap("2026_10", "UNKNOWN_STATUS");
+        assertFalse("Rejects status not in ['DRAFT', 'PUBLISHED']",
+                adminUserViaCollection.canCreateOrUpdateMonthlyRoster(invalidStatus, "2026_10"));
+
+        // Published roster missing publishedAt or publishedByUid
+        Map<String, Object> missingPublisher = createValidRosterMap("2026_10", "PUBLISHED");
+        missingPublisher.remove("publishedByUid");
+        assertFalse("Rejects PUBLISHED roster missing publishedByUid",
+                adminUserViaCollection.canCreateOrUpdateMonthlyRoster(missingPublisher, "2026_10"));
     }
 
     @Test
-    public void testRemoteAccess_RevokedAdminRosterPublishingBlocked() {
-        Map<String, Object> draft = createValidRosterMap("2026_10_draft", "DRAFT");
-        Map<String, Object> published = createValidRosterMap("2026_10", "PUBLISHED");
+    public void testMonthlyRoster_QueryListFiltering() {
+        // Query filtered by status == 'PUBLISHED'
+        assertTrue("Normal user can query published rosters with filter", normalNurse.canListMonthlyRosters("PUBLISHED"));
 
-        // Revoke the admin user specifically in /app_access/{adminUid}
-        adminUserViaCollection.userAccessDocs.put(ADMIN_UID, false);
+        // Query without filter or with 'DRAFT'
+        assertFalse("Normal user CANNOT query draft rosters", normalNurse.canListMonthlyRosters("DRAFT"));
+        assertFalse("Normal user CANNOT query without status filter", normalNurse.canListMonthlyRosters(null));
 
-        assertFalse("Revoked admin CANNOT save draft roster",
-                adminUserViaCollection.canCreateOrUpdateMonthlyRoster(draft, "2026_10_draft"));
-        assertFalse("Revoked admin CANNOT publish roster",
-                adminUserViaCollection.canCreateOrUpdateMonthlyRoster(published, "2026_10"));
-        assertFalse("Revoked admin CANNOT delete roster",
-                adminUserViaCollection.canDeleteMonthlyRoster());
-        assertFalse("Revoked admin CANNOT read rosters",
-                adminUserViaCollection.canGetMonthlyRoster(published));
+        // Admin can query with any filter
+        assertTrue("Admin can query with filter", adminUserViaCollection.canListMonthlyRosters("PUBLISHED"));
+        assertTrue("Admin can query drafts", adminUserViaCollection.canListMonthlyRosters("DRAFT"));
+        assertTrue("Admin can query without filter", adminUserViaCollection.canListMonthlyRosters(null));
     }
 
+    // ── 3. Per-User Isolation Tests (/users/{uid}/**) ───────────────────────────
+
     @Test
-    public void testPerUserIsolation_OwnerAccess() {
+    public void testPerUserIsolation_UsersCannotAccessOtherUserData() {
+        // User A accessing User A duties
         assertTrue("User A can read their own duty", normalNurse.canReadUserDuty(NURSE_A_UID));
         assertTrue("User A can delete their own duty", normalNurse.canDeleteUserDuty(NURSE_A_UID));
 
+        // User B attempting to access User A duties
         assertFalse("User B CANNOT read User A duties", anotherNurse.canReadUserDuty(NURSE_A_UID));
         assertFalse("User B CANNOT delete User A duties", anotherNurse.canDeleteUserDuty(NURSE_A_UID));
 
+        // Unauthenticated user cannot access any user duties
         assertFalse("Unauthenticated user cannot read duties", unauthenticatedUser.canReadUserDuty(NURSE_A_UID));
     }
 
     @Test
     public void testPerUserIsolation_UserCannotSpoofOwnerUidOnWrite() {
-        Map<String, Object> validDutyForNurseA = createValidDutyMap("duty_01", NURSE_A_UID);
+        Map<String, Object> validDutyForNurseA = new HashMap<>();
+        validDutyForNurseA.put("id", "duty_01");
+        validDutyForNurseA.put("ownerUid", NURSE_A_UID);
+        validDutyForNurseA.put("dutyDate", "2026-10-15");
+        validDutyForNurseA.put("shiftType", "MORNING");
+        validDutyForNurseA.put("status", "SCHEDULED");
+        validDutyForNurseA.put("updatedAt", System.currentTimeMillis());
 
+        // Valid write by Owner
         assertTrue("Nurse A can write duty with ownerUid == NURSE_A_UID",
                 normalNurse.canCreateUserDuty(NURSE_A_UID, "duty_01", validDutyForNurseA));
 
+        // Nurse A attempting to write a duty into Nurse B's path
         assertFalse("Nurse A cannot write into Nurse B collection",
                 normalNurse.canCreateUserDuty(NURSE_B_UID, "duty_01", validDutyForNurseA));
 
+        // Nurse A attempting to write a duty into Nurse A path but setting ownerUid to Nurse B
         Map<String, Object> spoofedOwner = new HashMap<>(validDutyForNurseA);
         spoofedOwner.put("ownerUid", NURSE_B_UID);
         assertFalse("Cannot write duty with ownerUid spoofed to another user",
                 normalNurse.canCreateUserDuty(NURSE_A_UID, "duty_01", spoofedOwner));
-    }
-
-    private Map<String, Object> createValidDutyMap(String id, String ownerUid) {
-        Map<String, Object> map = new HashMap<>();
-        map.put("id", id);
-        map.put("ownerUid", ownerUid);
-        map.put("dutyDate", "2026-10-15");
-        map.put("shiftType", "MORNING");
-        map.put("status", "SCHEDULED");
-        map.put("updatedAt", System.currentTimeMillis());
-        return map;
     }
 
     private Map<String, Object> createValidRosterMap(String id, String status) {

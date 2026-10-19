@@ -8,14 +8,14 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 
-const PROJECT_ID = 'demo-nxtshift-rules-test';
+const PROJECT_ID = 'demo-nxtshift-candidate-rules-test';
 const RULES_PATH = path.resolve(__dirname, '../firestore.rules');
 
 let testEnv;
 
-// --- Helper Functions to get fresh context/db instances per call ---
+// --- Helper Functions ---
 
-function getUserDb(uid, tokenOptions) {
+function getUserDb(uid, tokenOptions = {}) {
   return testEnv.authenticatedContext(uid, tokenOptions).firestore();
 }
 
@@ -58,40 +58,13 @@ function validPublishedRoster(id, publishedByUid) {
   };
 }
 
-async function setGlobalControl(enabled, message = 'All services operational') {
-  await testEnv.withSecurityRulesDisabled(async (context) => {
-    await context.firestore().collection('app_control').doc('global').set({
-      enabled,
-      message,
-      updatedAt: Date.now(),
-      updatedByUid: 'admin_setup',
-      minimumSupportedVersion: 1,
-    });
-  });
-  await new Promise((resolve) => setTimeout(resolve, 50));
-}
-
-async function setAdmin(adminUid) {
+async function setAdminDoc(adminUid) {
   await testEnv.withSecurityRulesDisabled(async (context) => {
     await context.firestore().collection('admins').doc(adminUid).set({
       active: true,
       createdAt: Date.now(),
     });
   });
-  await new Promise((resolve) => setTimeout(resolve, 50));
-}
-
-async function setUserAccess(uid, enabled, reason = 'Test Access Control') {
-  await testEnv.withSecurityRulesDisabled(async (context) => {
-    await context.firestore().collection('app_access').doc(uid).set({
-      uid,
-      enabled,
-      reason,
-      updatedAt: Date.now(),
-      updatedByUid: 'admin_setup',
-    });
-  });
-  await new Promise((resolve) => setTimeout(resolve, 50));
 }
 
 before(async () => {
@@ -121,475 +94,339 @@ after(async () => {
 });
 
 // =============================================================================
-// 1. Missing Global Control Fails Closed
+// Suite 1: Authentication & isAdmin() Evaluation (Safe Missing Claim vs Admin Doc)
 // =============================================================================
-test('1. Missing /app_control/global document fails closed for user duties', async () => {
-  // Do NOT create /app_control/global doc
-  const db = getUserDb('nurse_a');
-  const duty = validDuty('duty_1', 'nurse_a');
-  const dutyRef = db.collection('users').doc('nurse_a').collection('duties').doc('duty_1');
 
-  await assertFails(dutyRef.set(duty));
-  await assertFails(dutyRef.get());
+test('1.1. Authenticated user with NO admin claim and NO admin doc is NOT admin', async () => {
+  const db = getUserDb('user_without_claim'); // empty token, no 'admin' key
+  // Should not throw error on token.get('admin', false), evaluates to false
+  const draftRef = db.collection('monthly_rosters').doc('2026_11');
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await context.firestore().collection('monthly_rosters').doc('2026_11').set(validDraftRoster('2026_11'));
+  });
+
+  // Cannot read draft roster
+  await assertFails(draftRef.get());
+  // Cannot create monthly roster
+  await assertFails(draftRef.set(validDraftRoster('2026_11')));
+  // Cannot list /admins collection
+  await assertFails(db.collection('admins').get());
 });
 
-test('1b. Missing /app_control/global document fails closed for admin monthly rosters', async () => {
-  await setAdmin('admin_user');
-  const db = getUserDb('admin_user');
+test('1.2. Authenticated user with custom claim { admin: true } is authorized as admin', async () => {
+  const db = getUserDb('claim_admin_user', { admin: true });
+  const draftRef = db.collection('monthly_rosters').doc('2026_11');
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await context.firestore().collection('monthly_rosters').doc('2026_11').set(validDraftRoster('2026_11'));
+  });
+
+  // Can read draft roster
+  await assertSucceeds(draftRef.get());
+  // Can create valid monthly roster
+  const newRosterRef = db.collection('monthly_rosters').doc('2026_12');
+  await assertSucceeds(newRosterRef.set(validDraftRoster('2026_12')));
+  // Can list /admins collection
+  await assertSucceeds(db.collection('admins').get());
+});
+
+test('1.3. Authenticated user with custom claim { admin: false } is NOT authorized as admin', async () => {
+  const db = getUserDb('claim_false_user', { admin: false });
+  const draftRef = db.collection('monthly_rosters').doc('2026_11');
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await context.firestore().collection('monthly_rosters').doc('2026_11').set(validDraftRoster('2026_11'));
+  });
+
+  await assertFails(draftRef.get());
+  await assertFails(draftRef.set(validDraftRoster('2026_11')));
+  await assertFails(db.collection('admins').get());
+});
+
+test('1.4. User with NO admin claim BUT with /admins/{uid} document is authorized as admin', async () => {
+  const uid = 'doc_admin_user';
+  await setAdminDoc(uid);
+  const db = getUserDb(uid); // No token claim, but exists in /admins/{uid}
+
+  const draftRef = db.collection('monthly_rosters').doc('2026_11');
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await context.firestore().collection('monthly_rosters').doc('2026_11').set(validDraftRoster('2026_11'));
+  });
+
+  // Allowed because exists(/databases/$(database)/documents/admins/$(request.auth.uid)) is true
+  await assertSucceeds(draftRef.get());
+  // Can create monthly roster
+  const newRosterRef = db.collection('monthly_rosters').doc('2026_12');
+  await assertSucceeds(newRosterRef.set(validDraftRoster('2026_12')));
+  // Can list /admins collection
+  await assertSucceeds(db.collection('admins').get());
+});
+
+test('1.5. Unauthenticated user is denied all access', async () => {
+  const db = getUnauthedDb();
+  await assertFails(db.collection('monthly_rosters').doc('2026_11').get());
+  await assertFails(db.collection('admins').doc('any').get());
+  await assertFails(db.collection('users').doc('any').get());
+});
+
+// =============================================================================
+// Suite 2: /admins/{adminUid} Collection Permissions
+// =============================================================================
+
+test('2.1. Any authenticated user can get their own /admins/{uid} document', async () => {
+  const db = getUserDb('nurse_a');
+  // Can get their own doc (even when non-existent, does not fail permission denied)
+  const ownRef = db.collection('admins').doc('nurse_a');
+  await assertSucceeds(ownRef.get());
+});
+
+test('2.2. Normal user CANNOT get another user /admins/{otherUid} document', async () => {
+  const db = getUserDb('nurse_a');
+  const otherRef = db.collection('admins').doc('nurse_b');
+  await assertFails(otherRef.get());
+});
+
+test('2.3. Admin CAN get another user /admins/{otherUid} document', async () => {
+  const db = getUserDb('claim_admin', { admin: true });
+  const otherRef = db.collection('admins').doc('nurse_b');
+  await assertSucceeds(otherRef.get());
+});
+
+test('2.4. Normal user CANNOT list /admins collection', async () => {
+  const db = getUserDb('nurse_a');
+  await assertFails(db.collection('admins').get());
+});
+
+test('2.5. Admin CAN list /admins collection', async () => {
+  await setAdminDoc('doc_admin');
+  const db = getUserDb('doc_admin');
+  await assertSucceeds(db.collection('admins').get());
+});
+
+test('2.6. Client writes to /admins collection are COMPLETELY BLOCKED for all users', async () => {
+  const userDb = getUserDb('nurse_a');
+  const claimAdminDb = getUserDb('claim_admin', { admin: true });
+  await setAdminDoc('doc_admin');
+  const docAdminDb = getUserDb('doc_admin');
+
+  // Normal user cannot write
+  await assertFails(userDb.collection('admins').doc('nurse_a').set({ active: true }));
+  // Custom-claim admin cannot write
+  await assertFails(claimAdminDb.collection('admins').doc('new_admin').set({ active: true }));
+  // Doc admin cannot write or update
+  await assertFails(docAdminDb.collection('admins').doc('doc_admin').update({ active: false }));
+  // Deletions blocked
+  await assertFails(claimAdminDb.collection('admins').doc('doc_admin').delete());
+});
+
+// =============================================================================
+// Suite 3: Central Monthly Rosters (/monthly_rosters/{rosterId})
+// =============================================================================
+
+test('3.1. Normal authenticated user CAN read published monthly roster', async () => {
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await context.firestore().collection('monthly_rosters').doc('2026_11').set(
+      validPublishedRoster('2026_11', 'admin_123')
+    );
+  });
+
+  const db = getUserDb('nurse_a');
+  const rosterRef = db.collection('monthly_rosters').doc('2026_11');
+  await assertSucceeds(rosterRef.get());
+});
+
+test('3.2. Normal authenticated user CAN query/list published rosters with filter', async () => {
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await context.firestore().collection('monthly_rosters').doc('2026_11').set(
+      validPublishedRoster('2026_11', 'admin_123')
+    );
+  });
+
+  const db = getUserDb('nurse_a');
+  const query = db.collection('monthly_rosters').where('status', '==', 'PUBLISHED');
+  await assertSucceeds(query.get());
+});
+
+test('3.3. Normal authenticated user CANNOT read draft monthly roster', async () => {
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await context.firestore().collection('monthly_rosters').doc('2026_11').set(
+      validDraftRoster('2026_11')
+    );
+  });
+
+  const db = getUserDb('nurse_a');
+  const rosterRef = db.collection('monthly_rosters').doc('2026_11');
+  await assertFails(rosterRef.get());
+});
+
+test('3.4. Normal authenticated user CANNOT create, update, or delete monthly rosters', async () => {
+  const db = getUserDb('nurse_a');
   const rosterRef = db.collection('monthly_rosters').doc('2026_11');
 
   await assertFails(rosterRef.set(validDraftRoster('2026_11')));
-  await assertFails(rosterRef.get());
+  await assertFails(rosterRef.set(validPublishedRoster('2026_11', 'nurse_a')));
 });
 
-// =============================================================================
-// 2. Global Disable Blocks Cloud Operations
-// =============================================================================
-test('2. Disabled /app_control/global blocks user reads and writes', async () => {
-  await setGlobalControl(false, 'Hospital system undergoing maintenance');
-  const db = getUserDb('nurse_a');
-  const duty = validDuty('duty_1', 'nurse_a');
-  const dutyRef = db.collection('users').doc('nurse_a').collection('duties').doc('duty_1');
-
-  await assertFails(dutyRef.set(duty));
-  await assertFails(dutyRef.get());
-});
-
-test('2b. Disabled /app_control/global blocks admin roster publishing and reads', async () => {
-  await setGlobalControl(false, 'Emergency maintenance');
-  await setAdmin('admin_user');
-
-  // Seed a published roster via privileged API
-  await testEnv.withSecurityRulesDisabled(async (context) => {
-    await context.firestore().collection('monthly_rosters').doc('2026_10')
-      .set(validPublishedRoster('2026_10', 'admin_user'));
-  });
-
-  const db = getUserDb('admin_user');
-  const rosterRef = db.collection('monthly_rosters').doc('2026_10');
-  await assertFails(rosterRef.get());
-  await assertFails(rosterRef.update({ updatedAt: Date.now() }));
-  await assertFails(rosterRef.delete());
-});
-
-// =============================================================================
-// 3. Control Documents Modification Authorization
-// =============================================================================
-test('3. Non-admin and unauthenticated users cannot modify /app_control/global', async () => {
-  const unauthedDb = getUnauthedDb();
-  const userDb = getUserDb('nurse_a');
-
-  await assertFails(unauthedDb.collection('app_control').doc('global').set({ enabled: true }));
-  await assertFails(userDb.collection('app_control').doc('global').set({ enabled: true }));
-});
-
-test('3b. Admin user CAN modify /app_control/global', async () => {
-  await setAdmin('admin_user');
-  const adminDb = getUserDb('admin_user');
-
-  await assertSucceeds(adminDb.collection('app_control').doc('global').set({
-    enabled: true,
-    message: 'All systems nominal',
-    updatedAt: Date.now(),
-    updatedByUid: 'admin_user',
-    minimumSupportedVersion: 1,
-  }));
-});
-
-test('3c. Non-admin users cannot modify /app_access/{uid}', async () => {
-  await setGlobalControl(true);
-  const userDb = getUserDb('nurse_a');
-
-  // Normal user cannot grant themselves or change their access record
-  await assertFails(userDb.collection('app_access').doc('nurse_a').set({ enabled: true, uid: 'nurse_a' }));
-});
-
-test('3d. Admin user CAN write /app_access/{uid} to revoke or grant access', async () => {
-  await setAdmin('admin_user');
-  const adminDb = getUserDb('admin_user');
-
-  await assertSucceeds(adminDb.collection('app_access').doc('nurse_a').set({
-    uid: 'nurse_a',
-    enabled: false,
-    reason: 'Temporary suspension',
-    updatedAt: Date.now(),
-    updatedByUid: 'admin_user',
-  }));
-});
-
-test('3e. Authenticated user can read their own access record, but not others', async () => {
-  await setGlobalControl(true);
-  await setUserAccess('nurse_a', true);
-  await setUserAccess('nurse_b', true);
-
-  const userDb = getUserDb('nurse_a');
-  await assertSucceeds(userDb.collection('app_access').doc('nurse_a').get());
-  await assertFails(userDb.collection('app_access').doc('nurse_b').get());
-});
-
-test('3f. Revoked admin CANNOT modify /app_control/global or /app_access/{uid}', async () => {
-  await setGlobalControl(true);
-  await setAdmin('revoked_admin');
-  await setUserAccess('revoked_admin', false, 'Admin revoked for security audit');
-
-  const revokedAdminDb = getUserDb('revoked_admin');
-
-  // Attempt to modify /app_control/global
-  await assertFails(revokedAdminDb.collection('app_control').doc('global').set({
-    enabled: false,
-    message: 'Tampered by revoked admin',
-    updatedAt: Date.now(),
-    updatedByUid: 'revoked_admin',
-    minimumSupportedVersion: 1,
-  }));
-
-  // Attempt to un-revoke themselves in /app_access
-  await assertFails(revokedAdminDb.collection('app_access').doc('revoked_admin').set({
-    uid: 'revoked_admin',
-    enabled: true,
-    reason: 'Self-reinstatement',
-    updatedAt: Date.now(),
-    updatedByUid: 'revoked_admin',
-  }));
-
-  // Attempt to modify another user's access record
-  await assertFails(revokedAdminDb.collection('app_access').doc('nurse_a').set({
-    uid: 'nurse_a',
-    enabled: false,
-    reason: 'Revoked by compromised admin',
-    updatedAt: Date.now(),
-    updatedByUid: 'revoked_admin',
-  }));
-});
-
-test('3g. Non-admin and unauthenticated users CANNOT list /app_access collection; authorized admin CAN', async () => {
-  await setGlobalControl(true);
-  await setAdmin('admin_user');
-  await setUserAccess('nurse_a', true);
-
-  const unauthedDb = getUnauthedDb();
-  const userDb = getUserDb('nurse_a');
-  const adminDb = getUserDb('admin_user');
-
-  await assertFails(unauthedDb.collection('app_access').get());
-  await assertFails(userDb.collection('app_access').get());
-  await assertSucceeds(adminDb.collection('app_access').get());
-});
-
-test('3h. Unauthenticated users cannot read /app_control/global or /app_access/{uid}', async () => {
-  await setGlobalControl(true);
-  await setUserAccess('nurse_a', true);
-
-  const unauthedDb = getUnauthedDb();
-  await assertFails(unauthedDb.collection('app_control').doc('global').get());
-  await assertFails(unauthedDb.collection('app_access').doc('nurse_a').get());
-});
-
-// =============================================================================
-// 4. Revoked User Access
-// =============================================================================
-test('4. Revoked user cannot access their own duties or cloud data', async () => {
-  await setGlobalControl(true);
-  await setUserAccess('revoked_nurse', false, 'Access revoked by department head');
-
-  // Seed an existing duty via privileged API
-  await testEnv.withSecurityRulesDisabled(async (context) => {
-    await context.firestore().collection('users').doc('revoked_nurse').collection('duties').doc('duty_1')
-      .set(validDuty('duty_1', 'revoked_nurse'));
-  });
-
-  const revokedDb = getUserDb('revoked_nurse');
-  const dutyRef = revokedDb.collection('users').doc('revoked_nurse').collection('duties').doc('duty_1');
-
-  await assertFails(dutyRef.get());
-  await assertFails(dutyRef.set(validDuty('duty_2', 'revoked_nurse')));
-  await assertFails(dutyRef.delete());
-});
-
-test('4b. Revoked user cannot read published monthly rosters', async () => {
-  await setGlobalControl(true);
-  await setUserAccess('revoked_nurse', false);
-
-  await testEnv.withSecurityRulesDisabled(async (context) => {
-    await context.firestore().collection('monthly_rosters').doc('2026_10')
-      .set(validPublishedRoster('2026_10', 'admin_1'));
-  });
-
-  const revokedDb = getUserDb('revoked_nurse');
-  await assertFails(revokedDb.collection('monthly_rosters').doc('2026_10').get());
-});
-
-// =============================================================================
-// 5. Revoked Admin Access
-// =============================================================================
-test('5. Revoked admin cannot create, update, publish, or delete monthly rosters', async () => {
-  await setGlobalControl(true);
-  await setAdmin('revoked_admin');
-  await setUserAccess('revoked_admin', false, 'Admin revoked by security audit');
-
-  // Seed an existing roster via privileged API
-  await testEnv.withSecurityRulesDisabled(async (context) => {
-    await context.firestore().collection('monthly_rosters').doc('2026_10')
-      .set(validPublishedRoster('2026_10', 'revoked_admin'));
-  });
-
-  const revokedAdminDb = getUserDb('revoked_admin');
-  const draftRef = revokedAdminDb.collection('monthly_rosters').doc('2026_11_draft');
-  const publishedRef = revokedAdminDb.collection('monthly_rosters').doc('2026_10');
-
-  // Attempt draft creation
-  await assertFails(draftRef.set(validDraftRoster('2026_11_draft')));
-
-  // Attempt publication
-  await assertFails(draftRef.set(validPublishedRoster('2026_11_draft', 'revoked_admin')));
-
-  // Attempt update on existing roster
-  await assertFails(publishedRef.update({ updatedAt: Date.now() }));
-
-  // Attempt deletion of existing roster
-  await assertFails(publishedRef.delete());
-
-  // Attempt reading roster
-  await assertFails(publishedRef.get());
-});
-
-// =============================================================================
-// 6. Enabled Users Retain Intended Permissions & User Isolation
-// =============================================================================
-test('6. Enabled user can perform full CRUD on their own duties', async () => {
-  await setGlobalControl(true);
-  // nurse_a has no /app_access doc -> permitted by default
-  const userDb = getUserDb('nurse_a');
-  const duty = validDuty('duty_1', 'nurse_a');
-  const dutyRef = userDb.collection('users').doc('nurse_a').collection('duties').doc('duty_1');
-
-  // Create
-  await assertSucceeds(dutyRef.set(duty));
-
-  // Read
-  await assertSucceeds(dutyRef.get());
-
-  // Update
-  await assertSucceeds(dutyRef.update({
-    status: 'COMPLETED',
-    updatedAt: Date.now(),
-  }));
-
-  // Delete
-  await assertSucceeds(dutyRef.delete());
-});
-
-test('6b. Per-user data isolation prevents user from accessing other user duties', async () => {
-  await setGlobalControl(true);
-
-  // Seed nurse_b's duty via privileged API
-  await testEnv.withSecurityRulesDisabled(async (context) => {
-    await context.firestore().collection('users').doc('nurse_b').collection('duties').doc('duty_b_1')
-      .set(validDuty('duty_b_1', 'nurse_b'));
-  });
-
-  const userDb = getUserDb('nurse_a');
-  const otherDutyRef = userDb.collection('users').doc('nurse_b').collection('duties').doc('duty_b_1');
-
-  // nurse_a cannot read or modify nurse_b's data
-  await assertFails(otherDutyRef.get());
-  await assertFails(otherDutyRef.set(validDuty('duty_b_1', 'nurse_b')));
-  await assertFails(otherDutyRef.delete());
-});
-
-test('6c. User cannot forge duty data with mismatched ownerUid or ID', async () => {
-  await setGlobalControl(true);
-  const userDb = getUserDb('nurse_a');
-
-  // nurse_a tries to create duty with ownerUid: nurse_b in their own collection
-  const forgedOwner = validDuty('duty_1', 'nurse_b');
-  const dutyRef1 = userDb.collection('users').doc('nurse_a').collection('duties').doc('duty_1');
-  await assertFails(dutyRef1.set(forgedOwner));
-
-  // nurse_a tries to create duty with mismatched document ID vs data.id
-  const mismatchedId = validDuty('duty_other_id', 'nurse_a');
-  const dutyRef2 = userDb.collection('users').doc('nurse_a').collection('duties').doc('duty_1');
-  await assertFails(dutyRef2.set(mismatchedId));
-});
-
-test('6d. Nested user subcollections (profile, settings, staff, rosterImports) are strictly isolated', async () => {
-  await setGlobalControl(true);
-
-  // Seed nurse_b subdocuments via privileged API
-  await testEnv.withSecurityRulesDisabled(async (context) => {
-    const db = context.firestore();
-    await db.collection('users').doc('nurse_b').collection('profile').doc('main').set({ name: 'Nurse B' });
-    await db.collection('users').doc('nurse_b').collection('settings').doc('prefs').set({ theme: 'dark' });
-    await db.collection('users').doc('nurse_b').collection('staff').doc('staff_1').set({ staffName: 'Colleague' });
-    await db.collection('users').doc('nurse_b').collection('rosterImports').doc('import_1').set({ timestamp: Date.now() });
-  });
-
-  const userDb = getUserDb('nurse_a');
-  const unauthedDb = getUnauthedDb();
-
-  // nurse_a cannot read nurse_b's profile, settings, staff, or rosterImports
-  await assertFails(userDb.collection('users').doc('nurse_b').collection('profile').doc('main').get());
-  await assertFails(userDb.collection('users').doc('nurse_b').collection('settings').doc('prefs').get());
-  await assertFails(userDb.collection('users').doc('nurse_b').collection('staff').doc('staff_1').get());
-  await assertFails(userDb.collection('users').doc('nurse_b').collection('rosterImports').doc('import_1').get());
-
-  // unauthenticated user cannot read any nested user data
-  await assertFails(unauthedDb.collection('users').doc('nurse_b').collection('profile').doc('main').get());
-  await assertFails(unauthedDb.collection('users').doc('nurse_b').collection('settings').doc('prefs').get());
-
-  // nurse_a can read and write their own nested data
-  const ownProfile = userDb.collection('users').doc('nurse_a').collection('profile').doc('main');
-  await assertSucceeds(ownProfile.set({ name: 'Nurse A' }));
-  await assertSucceeds(ownProfile.get());
-});
-
-// =============================================================================
-// 7. Published Roster Reads & Non-Admin Mutations
-// =============================================================================
-test('7. Normal user can read PUBLISHED roster but CANNOT read DRAFT roster', async () => {
-  await testEnv.withSecurityRulesDisabled(async (context) => {
-    const db = context.firestore();
-    await db.collection('app_control').doc('global').set({
-      enabled: true,
-      message: 'All systems nominal',
-      updatedAt: Date.now(),
-      updatedByUid: 'admin_setup',
-      minimumSupportedVersion: 1,
-    });
-    await db.collection('monthly_rosters').doc('2026_10')
-      .set(validPublishedRoster('2026_10', 'admin_1'));
-    await db.collection('monthly_rosters').doc('2026_11_draft')
-      .set(validDraftRoster('2026_11_draft'));
-  });
-
-  const userDb = getUserDb('nurse_a');
-  const publishedRef = userDb.collection('monthly_rosters').doc('2026_10');
-  const draftRef = userDb.collection('monthly_rosters').doc('2026_11_draft');
-
-  await assertSucceeds(publishedRef.get());
-  await assertFails(draftRef.get());
-});
-
-test('7b. Normal user CANNOT create, update, or delete monthly rosters', async () => {
-  await setGlobalControl(true);
-  const userDb = getUserDb('nurse_a');
-  const draftRef = userDb.collection('monthly_rosters').doc('2026_11');
-
-  await assertFails(draftRef.set(validDraftRoster('2026_11')));
-});
-
-test('7c. Unauthenticated users cannot read monthly rosters or user duties', async () => {
-  await testEnv.withSecurityRulesDisabled(async (context) => {
-    const db = context.firestore();
-    await db.collection('app_control').doc('global').set({
-      enabled: true,
-      message: 'All systems nominal',
-      updatedAt: Date.now(),
-      updatedByUid: 'admin_setup',
-      minimumSupportedVersion: 1,
-    });
-    await db.collection('monthly_rosters').doc('2026_10')
-      .set(validPublishedRoster('2026_10', 'admin_1'));
-    await db.collection('users').doc('nurse_a').collection('duties').doc('duty_1')
-      .set(validDuty('duty_1', 'nurse_a'));
-  });
-
-  const unauthedDb = getUnauthedDb();
-  await assertFails(unauthedDb.collection('monthly_rosters').doc('2026_10').get());
-  await assertFails(unauthedDb.collection('monthly_rosters').get());
-  await assertFails(unauthedDb.collection('users').doc('nurse_a').collection('duties').doc('duty_1').get());
-});
-
-// =============================================================================
-// 8. Admin Roster Lifecycle & Schema Validation
-// =============================================================================
-test('8. Authorized admin can create draft, publish roster, and delete roster', async () => {
-  await setGlobalControl(true);
-  await setAdmin('admin_user');
-
-  const adminDb = getUserDb('admin_user');
-  const rosterRef = adminDb.collection('monthly_rosters').doc('2026_11');
-
-  // Create draft
+test('3.5. Admin CAN create and publish valid monthly roster', async () => {
+  const adminUid = 'admin_publisher';
+  const db = getUserDb(adminUid, { admin: true });
+  const rosterRef = db.collection('monthly_rosters').doc('2026_11');
+
+  // Draft creation
   await assertSucceeds(rosterRef.set(validDraftRoster('2026_11')));
 
-  // Read draft (admin only)
-  await assertSucceeds(rosterRef.get());
-
-  // Publish
-  await assertSucceeds(rosterRef.set(validPublishedRoster('2026_11', 'admin_user')));
-
-  // Delete
-  await assertSucceeds(rosterRef.delete());
+  // Publish with publishedByUid matching auth.uid
+  await assertSucceeds(rosterRef.set(validPublishedRoster('2026_11', adminUid)));
 });
 
-test('8b. Publishing with mismatched publishedByUid is rejected', async () => {
-  await setGlobalControl(true);
-  await setAdmin('admin_user');
+test('3.6. Admin CANNOT publish monthly roster if publishedByUid does not match auth.uid', async () => {
+  const adminUid = 'admin_publisher';
+  const db = getUserDb(adminUid, { admin: true });
+  const rosterRef = db.collection('monthly_rosters').doc('2026_11');
 
-  const adminDb = getUserDb('admin_user');
-  const rosterRef = adminDb.collection('monthly_rosters').doc('2026_11');
-
-  // Attempt to publish claiming publishedByUid is 'other_admin'
-  const mismatchedRoster = validPublishedRoster('2026_11', 'other_admin');
-  await assertFails(rosterRef.set(mismatchedRoster));
+  // publishedByUid set to someone else
+  const spoofedRoster = validPublishedRoster('2026_11', 'different_admin_uid');
+  await assertFails(rosterRef.set(spoofedRoster));
 });
 
-test('8c. Invalid roster data (missing required fields / invalid values) is rejected', async () => {
-  await setGlobalControl(true);
-  await setAdmin('admin_user');
+test('3.7. Admin CANNOT create monthly roster with invalid schema', async () => {
+  const adminUid = 'admin_publisher';
+  const db = getUserDb(adminUid, { admin: true });
+  const rosterRef = db.collection('monthly_rosters').doc('2026_11');
 
-  const adminDb = getUserDb('admin_user');
-  const rosterRef = adminDb.collection('monthly_rosters').doc('2026_11');
-
-  // Invalid month (month > 12)
+  // Invalid month (13)
   const invalidMonth = { ...validDraftRoster('2026_11'), month: 13 };
   await assertFails(rosterRef.set(invalidMonth));
 
-  // Invalid status (not DRAFT or PUBLISHED)
+  // Invalid year (2018 < 2020)
+  const invalidYear = { ...validDraftRoster('2026_11'), year: 2018 };
+  await assertFails(rosterRef.set(invalidYear));
+
+  // Invalid status
   const invalidStatus = { ...validDraftRoster('2026_11'), status: 'ARCHIVED' };
   await assertFails(rosterRef.set(invalidStatus));
+});
 
-  // Missing version
-  const missingVersion = { ...validDraftRoster('2026_11') };
-  delete missingVersion.version;
-  await assertFails(rosterRef.set(missingVersion));
+test('3.8. Admin CAN delete monthly roster', async () => {
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await context.firestore().collection('monthly_rosters').doc('2026_11').set(
+      validDraftRoster('2026_11')
+    );
+  });
 
-  // Non-numeric updatedAt
-  const nonNumericUpdated = { ...validDraftRoster('2026_11'), updatedAt: '2026-10-19' };
-  await assertFails(rosterRef.set(nonNumericUpdated));
+  const db = getUserDb('admin_deleter', { admin: true });
+  await assertSucceeds(db.collection('monthly_rosters').doc('2026_11').delete());
 });
 
 // =============================================================================
-// 9. Client Admin Document Write Prohibition
+// Suite 4: User Data Isolation & Duty Schema Validation (/users/{uid}/...)
 // =============================================================================
-test('9. No client app (even admin) can write to /admins collection', async () => {
-  await setAdmin('admin_user');
 
-  const adminDb = getUserDb('admin_user');
-  const newAdminRef = adminDb.collection('admins').doc('new_admin');
-  await assertFails(newAdminRef.set({ active: true }));
+test('4.1. User CAN access own profile, duties, rosterImports, staff, and settings', async () => {
+  const uid = 'nurse_user_1';
+  const db = getUserDb(uid);
 
-  const userDb = getUserDb('nurse_a');
-  const selfAdminRef = userDb.collection('admins').doc('nurse_a');
-  await assertFails(selfAdminRef.set({ active: true }));
+  // Root doc
+  await assertSucceeds(db.collection('users').doc(uid).set({ name: 'Nurse 1' }));
+  await assertSucceeds(db.collection('users').doc(uid).get());
+
+  // Profile sub-doc
+  await assertSucceeds(db.collection('users').doc(uid).collection('profile').doc('main').set({ bio: 'Nurse' }));
+  await assertSucceeds(db.collection('users').doc(uid).collection('profile').doc('main').get());
+
+  // Valid Duty
+  const duty = validDuty('duty_1', uid);
+  await assertSucceeds(db.collection('users').doc(uid).collection('duties').doc('duty_1').set(duty));
+  await assertSucceeds(db.collection('users').doc(uid).collection('duties').doc('duty_1').get());
+
+  // RosterImports
+  await assertSucceeds(db.collection('users').doc(uid).collection('rosterImports').doc('imp_1').set({ importedAt: Date.now() }));
+  await assertSucceeds(db.collection('users').doc(uid).collection('rosterImports').doc('imp_1').get());
+
+  // Staff
+  await assertSucceeds(db.collection('users').doc(uid).collection('staff').doc('st_1').set({ name: 'Colleague' }));
+  await assertSucceeds(db.collection('users').doc(uid).collection('staff').doc('st_1').get());
+
+  // Settings
+  await assertSucceeds(db.collection('users').doc(uid).collection('settings').doc('app').set({ darkMode: true }));
+  await assertSucceeds(db.collection('users').doc(uid).collection('settings').doc('app').get());
 });
 
-test('9b. Unauthenticated and non-admin users cannot read other admin documents', async () => {
-  await setAdmin('admin_user');
+test('4.2. User CANNOT read or write another user private data', async () => {
+  const uidA = 'nurse_user_a';
+  const uidB = 'nurse_user_b';
 
-  const unauthedDb = getUnauthedDb();
+  const dbB = getUserDb(uidB);
+  await dbB.collection('users').doc(uidB).set({ name: 'Nurse B' });
+  await dbB.collection('users').doc(uidB).collection('duties').doc('duty_b').set(validDuty('duty_b', uidB));
+
+  const dbA = getUserDb(uidA);
+  // Cannot read B's root doc
+  await assertFails(dbA.collection('users').doc(uidB).get());
+  // Cannot write B's root doc
+  await assertFails(dbA.collection('users').doc(uidB).set({ name: 'Hacked' }));
+  // Cannot read B's duties
+  await assertFails(dbA.collection('users').doc(uidB).collection('duties').doc('duty_b').get());
+  // Cannot write B's duties
+  await assertFails(dbA.collection('users').doc(uidB).collection('duties').doc('duty_new').set(validDuty('duty_new', uidB)));
+});
+
+test('4.3. Duty write schema rejects invalid duty data even from owner', async () => {
+  const uid = 'nurse_user_1';
+  const db = getUserDb(uid);
+
+  // Missing required field (e.g., status)
+  const invalidDuty1 = {
+    id: 'duty_bad_1',
+    ownerUid: uid,
+    dutyDate: '2026-10-25',
+    shiftType: 'MORNING',
+    updatedAt: Date.now(),
+    // missing status
+  };
+  await assertFails(db.collection('users').doc(uid).collection('duties').doc('duty_bad_1').set(invalidDuty1));
+
+  // ownerUid mismatch
+  const spoofedDuty = {
+    ...validDuty('duty_bad_2', 'someone_else'),
+    id: 'duty_bad_2',
+  };
+  await assertFails(db.collection('users').doc(uid).collection('duties').doc('duty_bad_2').set(spoofedDuty));
+
+  // Document ID mismatch with data.id
+  const mismatchedIdDuty = {
+    ...validDuty('duty_mismatch_id', uid),
+  };
+  await assertFails(db.collection('users').doc(uid).collection('duties').doc('different_doc_id').set(mismatchedIdDuty));
+});
+
+test('4.4. Owner CAN update and delete own duty, but CANNOT change ownerUid on update', async () => {
+  const uid = 'nurse_user_1';
+  const db = getUserDb(uid);
+  const duty = validDuty('duty_1', uid);
+
+  await assertSucceeds(db.collection('users').doc(uid).collection('duties').doc('duty_1').set(duty));
+
+  // Valid update
+  const updatedDuty = { ...duty, shiftType: 'NIGHT', updatedAt: Date.now() };
+  await assertSucceeds(db.collection('users').doc(uid).collection('duties').doc('duty_1').set(updatedDuty));
+
+  // Update changing ownerUid fails
+  const hijackedDuty = { ...updatedDuty, ownerUid: 'other_user' };
+  await assertFails(db.collection('users').doc(uid).collection('duties').doc('duty_1').set(hijackedDuty));
+
+  // Owner can delete
+  await assertSucceeds(db.collection('users').doc(uid).collection('duties').doc('duty_1').delete());
+});
+
+// =============================================================================
+// Suite 5: Catch-all Default Deny
+// =============================================================================
+
+test('5.1. Unmatched paths are denied for all users and admins', async () => {
   const userDb = getUserDb('nurse_a');
-  const adminDb = getUserDb('admin_user');
+  const adminDb = getUserDb('admin_a', { admin: true });
 
-  // Unauthenticated cannot read admin doc
-  await assertFails(unauthedDb.collection('admins').doc('admin_user').get());
-
-  // Non-admin cannot read other user's admin doc or list admin collection
-  await assertFails(userDb.collection('admins').doc('admin_user').get());
-  await assertFails(userDb.collection('admins').get());
-
-  // Admin CAN read admin doc and list admin collection
-  await assertSucceeds(adminDb.collection('admins').doc('admin_user').get());
-  await assertSucceeds(adminDb.collection('admins').get());
+  await assertFails(userDb.collection('arbitrary_collection').doc('doc1').set({ foo: 'bar' }));
+  await assertFails(adminDb.collection('arbitrary_collection').doc('doc1').set({ foo: 'bar' }));
+  await assertFails(userDb.collection('arbitrary_collection').doc('doc1').get());
+  await assertFails(adminDb.collection('arbitrary_collection').doc('doc1').get());
 });

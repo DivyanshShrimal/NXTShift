@@ -23,9 +23,6 @@ import com.nxtshift.app.data.remote.CentralRosterService;
 import com.nxtshift.app.data.repository.AuthRepository;
 import com.nxtshift.app.databinding.ActivityAdminDashboardBinding;
 import com.nxtshift.app.ocr.RosterCsvParser;
-import com.nxtshift.app.data.model.GlobalAccessConfig;
-import com.nxtshift.app.data.model.UserAccessRecord;
-import com.nxtshift.app.data.repository.AccessControlRepository;
 import com.nxtshift.app.util.DateTimeUtils;
 
 import java.io.InputStream;
@@ -45,8 +42,6 @@ public class AdminDashboardActivity extends AppCompatActivity {
 
     private String currentUid;
     private String currentEmail;
-    private AccessControlRepository accessControlRepository;
-    private UserAccessRecord searchedUserRecord;
 
     private int selectedYear;
     private int selectedMonth; // 1-12
@@ -75,8 +70,7 @@ public class AdminDashboardActivity extends AppCompatActivity {
 
         currentUid = authRepository.getCurrentUid();
         currentEmail = authRepository.getCurrentEmail();
-        accessControlRepository = AccessControlRepository.getInstance(this);
-        centralRosterService = new CentralRosterService(accessControlRepository);
+        centralRosterService = new CentralRosterService();
 
         // Initialize default month/year (current month)
         LocalDate now = LocalDate.now();
@@ -102,14 +96,12 @@ public class AdminDashboardActivity extends AppCompatActivity {
         binding.btnSaveDraft.setOnClickListener(v -> saveDraft());
         binding.btnPublishRoster.setOnClickListener(v -> confirmPublishRoster());
 
-        setupAccessControlUI();
         updateMonthDisplay();
     }
 
     private void verifyAdminAccess() {
         binding.progressBar.setVisibility(View.VISIBLE);
         binding.cardUpload.setVisibility(View.GONE);
-        binding.cardAccessControl.setVisibility(View.GONE);
 
         centralRosterService.checkIsAdmin(currentUid, new CentralRosterService.Callback<Boolean>() {
             @Override
@@ -117,9 +109,7 @@ public class AdminDashboardActivity extends AppCompatActivity {
                 binding.progressBar.setVisibility(View.GONE);
                 if (Boolean.TRUE.equals(isAdmin)) {
                     binding.cardUpload.setVisibility(View.VISIBLE);
-                    binding.cardAccessControl.setVisibility(View.VISIBLE);
                     loadCurrentMonthRosterStatus();
-                    loadGlobalAccessConfig();
                 } else {
                     new MaterialAlertDialogBuilder(AdminDashboardActivity.this)
                             .setTitle("Access Restricted")
@@ -460,186 +450,5 @@ public class AdminDashboardActivity extends AppCompatActivity {
             }
         }
         return result != null ? result : "roster_upload.csv";
-    }
-
-    // --- Remote Access Control UI Logic ---
-
-    private void setupAccessControlUI() {
-        binding.btnSaveGlobalAccess.setOnClickListener(v -> confirmUpdateGlobalAccess());
-        binding.btnCheckUserAccess.setOnClickListener(v -> lookupUserAccess());
-        binding.btnRevokeUser.setOnClickListener(v -> confirmRevokeUserAccess());
-        binding.btnRestoreUser.setOnClickListener(v -> confirmRestoreUserAccess());
-    }
-
-    private void loadGlobalAccessConfig() {
-        accessControlRepository.fetchGlobalAccessConfig(new AccessControlRepository.ActionCallback<GlobalAccessConfig>() {
-            @Override
-            public void onSuccess(GlobalAccessConfig config) {
-                if (config != null) {
-                    binding.switchGlobalAccess.setChecked(config.isEnabled());
-                    binding.etGlobalMessage.setText(config.getMessage() != null ? config.getMessage() : "");
-                    updateGlobalStatusDisplay(config.isEnabled());
-                }
-            }
-
-            @Override
-            public void onError(Exception e) {
-                Toast.makeText(AdminDashboardActivity.this, "Could not fetch global access config: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-            }
-        });
-    }
-
-    private void updateGlobalStatusDisplay(boolean enabled) {
-        if (enabled) {
-            binding.viewGlobalStatusDot.setBackgroundTintList(ContextCompat.getColorStateList(this, R.color.status_synced));
-            binding.tvGlobalStatusText.setText("Global App Access: Enabled");
-        } else {
-            binding.viewGlobalStatusDot.setBackgroundTintList(ContextCompat.getColorStateList(this, R.color.status_error));
-            binding.tvGlobalStatusText.setText("Global App Access: Disabled (Maintenance)");
-        }
-    }
-
-    private void confirmUpdateGlobalAccess() {
-        boolean targetEnabled = binding.switchGlobalAccess.isChecked();
-        String message = binding.etGlobalMessage.getText() != null ? binding.etGlobalMessage.getText().toString().trim() : "";
-
-        String title = targetEnabled ? "Enable Global Access?" : "Disable Global Access (Maintenance Mode)?";
-        String alertMsg = targetEnabled
-                ? "This will allow all authorized users to connect to Cloud Firestore and sync duty rosters."
-                : "This will place the application in Maintenance Mode for all users. Remote cloud mutations and roster publishing will be blocked until re-enabled.\n\nOffline calendar and local cached duties will remain accessible.";
-
-        new MaterialAlertDialogBuilder(this)
-                .setTitle(title)
-                .setMessage(alertMsg)
-                .setPositiveButton("Apply Status", (dialog, which) -> executeUpdateGlobalAccess(targetEnabled, message))
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    private void executeUpdateGlobalAccess(boolean enabled, String message) {
-        setAccessControlLoading(true);
-
-        accessControlRepository.setGlobalAccess(enabled, message, currentUid, new AccessControlRepository.ActionCallback<Void>() {
-            @Override
-            public void onSuccess(Void result) {
-                setAccessControlLoading(false);
-                updateGlobalStatusDisplay(enabled);
-                String toast = enabled ? "Global app access enabled successfully." : "Global app access disabled (Maintenance Mode).";
-                Toast.makeText(AdminDashboardActivity.this, toast, Toast.LENGTH_LONG).show();
-            }
-
-            @Override
-            public void onError(Exception e) {
-                setAccessControlLoading(false);
-                Toast.makeText(AdminDashboardActivity.this, "Failed to update global access: " + e.getMessage(), Toast.LENGTH_LONG).show();
-                loadGlobalAccessConfig(); // Rollback to actual server state
-            }
-        });
-    }
-
-    private void lookupUserAccess() {
-        String targetUid = binding.etTargetUid.getText() != null ? binding.etTargetUid.getText().toString().trim() : "";
-        if (targetUid.isEmpty()) {
-            binding.tilTargetUid.setError("Please enter a valid Firebase User UID");
-            return;
-        }
-        binding.tilTargetUid.setError(null);
-        setAccessControlLoading(true);
-
-        accessControlRepository.fetchUserAccess(targetUid, new AccessControlRepository.ActionCallback<UserAccessRecord>() {
-            @Override
-            public void onSuccess(UserAccessRecord record) {
-                setAccessControlLoading(false);
-                searchedUserRecord = record;
-                displayUserAccessResult(record);
-            }
-
-            @Override
-            public void onError(Exception e) {
-                setAccessControlLoading(false);
-                Toast.makeText(AdminDashboardActivity.this, "User lookup failed: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-            }
-        });
-    }
-
-    private void displayUserAccessResult(UserAccessRecord record) {
-        binding.layoutUserResult.setVisibility(View.VISIBLE);
-        if (record.isEnabled()) {
-            binding.tvUserStatusInfo.setText("User " + record.getUid() + ": Active (Allowed)");
-            binding.tvUserStatusInfo.setTextColor(ContextCompat.getColor(this, R.color.text_primary));
-            binding.tvUserReasonInfo.setText("Reason: " + (record.getReason().isEmpty() ? "No restrictions" : record.getReason()));
-            binding.btnRevokeUser.setVisibility(View.VISIBLE);
-            binding.btnRestoreUser.setVisibility(View.GONE);
-        } else {
-            binding.tvUserStatusInfo.setText("User " + record.getUid() + ": Revoked (Blocked)");
-            binding.tvUserStatusInfo.setTextColor(ContextCompat.getColor(this, R.color.status_error));
-            binding.tvUserReasonInfo.setText("Reason: " + (record.getReason().isEmpty() ? "Revoked by admin" : record.getReason()));
-            binding.btnRevokeUser.setVisibility(View.GONE);
-            binding.btnRestoreUser.setVisibility(View.VISIBLE);
-        }
-    }
-
-    private void confirmRevokeUserAccess() {
-        if (searchedUserRecord == null) return;
-        final String targetUid = searchedUserRecord.getUid();
-
-        final android.widget.EditText inputReason = new android.widget.EditText(this);
-        inputReason.setHint("Reason for revocation (e.g. Inactive, Security review)");
-
-        new MaterialAlertDialogBuilder(this)
-                .setTitle("Revoke User Cloud Access")
-                .setMessage("Are you sure you want to revoke remote cloud access for user:\n" + targetUid + "\n\nThey will be blocked from syncing cloud duties. Local calendar access remains available.")
-                .setView(inputReason)
-                .setPositiveButton("Revoke Access", (dialog, which) -> {
-                    String reason = inputReason.getText() != null ? inputReason.getText().toString().trim() : "";
-                    if (reason.isEmpty()) reason = "Access revoked by administrator";
-                    executeUserAccessUpdate(targetUid, false, reason);
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    private void confirmRestoreUserAccess() {
-        if (searchedUserRecord == null) return;
-        final String targetUid = searchedUserRecord.getUid();
-
-        new MaterialAlertDialogBuilder(this)
-                .setTitle("Restore User Cloud Access")
-                .setMessage("Restore remote cloud access for user:\n" + targetUid + "?\n\nThey will be re-authorized to synchronize duty rosters with Firestore.")
-                .setPositiveButton("Restore Access", (dialog, which) -> {
-                    executeUserAccessUpdate(targetUid, true, "Access restored by administrator");
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    private void executeUserAccessUpdate(String targetUid, boolean enabled, String reason) {
-        setAccessControlLoading(true);
-
-        accessControlRepository.setUserAccess(targetUid, enabled, reason, currentUid, new AccessControlRepository.ActionCallback<Void>() {
-            @Override
-            public void onSuccess(Void result) {
-                setAccessControlLoading(false);
-                String toast = enabled ? "Access restored for user: " + targetUid : "Access revoked for user: " + targetUid;
-                Toast.makeText(AdminDashboardActivity.this, toast, Toast.LENGTH_SHORT).show();
-                // Refresh lookup record
-                lookupUserAccess();
-            }
-
-            @Override
-            public void onError(Exception e) {
-                setAccessControlLoading(false);
-                Toast.makeText(AdminDashboardActivity.this, "Failed to update user access: " + e.getMessage(), Toast.LENGTH_LONG).show();
-            }
-        });
-    }
-
-    private void setAccessControlLoading(boolean loading) {
-        binding.pbAccessAction.setVisibility(loading ? View.VISIBLE : View.GONE);
-        binding.btnSaveGlobalAccess.setEnabled(!loading);
-        binding.btnCheckUserAccess.setEnabled(!loading);
-        binding.btnRevokeUser.setEnabled(!loading);
-        binding.btnRestoreUser.setEnabled(!loading);
-        binding.switchGlobalAccess.setEnabled(!loading);
     }
 }
