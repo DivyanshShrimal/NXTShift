@@ -87,10 +87,6 @@
             android:name=".ui.settings.SettingsActivity"
             android:exported="false" />
 
-        <activity
-            android:name=".ui.access.AccessRestrictedActivity"
-            android:exported="false" />
-
         <!-- Broadcast Receivers for Alarms, Reboot, and Time Changes -->
         <receiver
             android:name=".receivers.AlarmReceiver"

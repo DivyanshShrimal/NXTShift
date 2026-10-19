@@ -3,7 +3,7 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // ─────────────────────────────────────────────────────────────────────────────
-    // Helper Functions for Secure Authentication, Ownership, Role & Access Control
+    // Helper Functions for Secure Authentication, Ownership, and Role Verification
     // ─────────────────────────────────────────────────────────────────────────────
 
     // Checks that the incoming request is from a valid, authenticated Firebase user
@@ -31,29 +31,9 @@ service cloud.firestore {
     // Client-side role claims or request data fields are NEVER trusted as the security boundary.
     function isAdmin() {
       return isAuthenticated() && (
-        request.auth.token.get('admin', false) == true ||
+        request.auth.token.admin == true ||
         exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
-    }
-
-    // Checks whether the application is globally enabled for online operations.
-    // Fails closed if the /app_control/global document is missing, disabled, or invalid.
-    function isGlobalEnabled() {
-      return exists(/databases/$(database)/documents/app_control/global)
-          && get(/databases/$(database)/documents/app_control/global).data.enabled == true;
-    }
-
-    // Checks whether the specific authenticated user has not had their remote access revoked.
-    // If no /app_access/{uid} document exists, the user is permitted by default.
-    // If a document exists, its 'enabled' field must not be false.
-    function isUserAccessAllowed(uid) {
-      return !exists(/databases/$(database)/documents/app_access/$(uid))
-          || get(/databases/$(database)/documents/app_access/$(uid)).data.enabled == true;
-    }
-
-    // Combined server-side gate for protected cloud reads and writes.
-    function isAccessPermitted(uid) {
-      return isGlobalEnabled() && isUserAccessAllowed(uid);
     }
 
     // Validates central monthly roster schema, versioning, status constraints,
@@ -82,79 +62,64 @@ service cloud.firestore {
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
-    // 2. Remote Access Control Collections: /app_control and /app_access
+    // 2. Central Monthly Roster Collection: /monthly_rosters/{rosterId}
     // ─────────────────────────────────────────────────────────────────────────────
-    // Global application availability control
-    match /app_control/global {
-      allow get: if isAuthenticated();
-      allow write: if isAdmin() && isUserAccessAllowed(request.auth.uid);
-    }
-
-    // Individual user access / revocation records
-    match /app_access/{targetUid} {
-      allow get: if isAuthenticated() && (request.auth.uid == targetUid || (isAdmin() && isUserAccessAllowed(request.auth.uid)));
-      allow list: if isAdmin() && isUserAccessAllowed(request.auth.uid);
-      allow write: if isAdmin() && isUserAccessAllowed(request.auth.uid);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // 3. Central Monthly Roster Collection: /monthly_rosters/{rosterId}
-    // ─────────────────────────────────────────────────────────────────────────────
-    // - Authenticated users can read published rosters when global access is enabled and user is not revoked.
-    // - Only verified admins can read drafts, create, update, publish, or delete central rosters.
-    // - All mutations and publishing are blocked when global access is disabled.
+    // - Authenticated users can read published rosters or check non-existent documents without permission denial.
+    // - Authenticated users can list/query published rosters when filtering by status == 'PUBLISHED'.
+    // - Unpublished drafts are strictly inaccessible to normal users.
+    // - Only verified admins can read drafts, and create, update, publish, or delete central rosters.
     match /monthly_rosters/{rosterId} {
-      allow get: if isAuthenticated() && isAccessPermitted(request.auth.uid) && (
+      allow get: if isAuthenticated() && (
         resource == null || resource.data.status == 'PUBLISHED' || isAdmin()
       );
-      allow list: if isAuthenticated() && isAccessPermitted(request.auth.uid) && (
+      allow list: if isAuthenticated() && (
         resource.data.status == 'PUBLISHED' || isAdmin()
       );
-      allow create, update: if isAdmin() && isAccessPermitted(request.auth.uid) && isValidMonthlyRoster(request.resource.data, rosterId);
-      allow delete: if isAdmin() && isAccessPermitted(request.auth.uid);
+      allow create, update: if isAdmin() && isValidMonthlyRoster(request.resource.data, rosterId);
+      allow delete: if isAdmin();
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
-    // 4. User Isolated Root Document & Profile: /users/{uid} (PRESERVED & GATED)
+    // 3. User Isolated Root Document & Profile: /users/{uid} (PRESERVED)
     // ─────────────────────────────────────────────────────────────────────────────
     match /users/{uid} {
-      allow read, write: if isOwner(uid) && isAccessPermitted(uid);
+      allow read, write: if isOwner(uid);
 
       // User Profile sub-document
       match /profile/{profileDoc} {
-        allow read, write: if isOwner(uid) && isAccessPermitted(uid);
+        allow read, write: if isOwner(uid);
       }
 
       // User Isolated Duties Collection
       match /duties/{dutyId} {
-        allow read: if isOwner(uid) && isAccessPermitted(uid);
-        allow create: if isOwner(uid) && isAccessPermitted(uid)
+        allow read: if isOwner(uid);
+        allow create: if isOwner(uid) 
                       && isValidDutyData(request.resource.data, uid)
                       && request.resource.data.id == dutyId;
-        allow update: if isOwner(uid) && isAccessPermitted(uid)
+        allow update: if isOwner(uid)
                       && isValidDutyData(request.resource.data, uid)
                       && request.resource.data.ownerUid == resource.data.ownerUid;
-        allow delete: if isOwner(uid) && isAccessPermitted(uid);
+        allow delete: if isOwner(uid);
       }
 
       // Roster Imports log
       match /rosterImports/{importId} {
-        allow read, write: if isOwner(uid) && isAccessPermitted(uid);
+        allow read, write: if isOwner(uid);
       }
 
       // User Staff Directory
       match /staff/{staffId} {
-        allow read, write: if isOwner(uid) && isAccessPermitted(uid);
+        allow read, write: if isOwner(uid);
       }
 
       // User Settings and Preferences
       match /settings/{settingsDoc} {
-        allow read, write: if isOwner(uid) && isAccessPermitted(uid);
+        allow read, write: if isOwner(uid);
       }
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
-    // 5. Default Deny Catch-All (PRESERVED)
+    // 4. Default Deny Catch-All (PRESERVED)
     // ─────────────────────────────────────────────────────────────────────────────
     // Deny access by default to any other unmatched collection or document
     match /{document=**} {
