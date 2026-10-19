@@ -227,6 +227,64 @@ test('3e. Authenticated user can read their own access record, but not others', 
   await assertFails(userDb.collection('app_access').doc('nurse_b').get());
 });
 
+test('3f. Revoked admin CANNOT modify /app_control/global or /app_access/{uid}', async () => {
+  await setGlobalControl(true);
+  await setAdmin('revoked_admin');
+  await setUserAccess('revoked_admin', false, 'Admin revoked for security audit');
+
+  const revokedAdminDb = getUserDb('revoked_admin');
+
+  // Attempt to modify /app_control/global
+  await assertFails(revokedAdminDb.collection('app_control').doc('global').set({
+    enabled: false,
+    message: 'Tampered by revoked admin',
+    updatedAt: Date.now(),
+    updatedByUid: 'revoked_admin',
+    minimumSupportedVersion: 1,
+  }));
+
+  // Attempt to un-revoke themselves in /app_access
+  await assertFails(revokedAdminDb.collection('app_access').doc('revoked_admin').set({
+    uid: 'revoked_admin',
+    enabled: true,
+    reason: 'Self-reinstatement',
+    updatedAt: Date.now(),
+    updatedByUid: 'revoked_admin',
+  }));
+
+  // Attempt to modify another user's access record
+  await assertFails(revokedAdminDb.collection('app_access').doc('nurse_a').set({
+    uid: 'nurse_a',
+    enabled: false,
+    reason: 'Revoked by compromised admin',
+    updatedAt: Date.now(),
+    updatedByUid: 'revoked_admin',
+  }));
+});
+
+test('3g. Non-admin and unauthenticated users CANNOT list /app_access collection; authorized admin CAN', async () => {
+  await setGlobalControl(true);
+  await setAdmin('admin_user');
+  await setUserAccess('nurse_a', true);
+
+  const unauthedDb = getUnauthedDb();
+  const userDb = getUserDb('nurse_a');
+  const adminDb = getUserDb('admin_user');
+
+  await assertFails(unauthedDb.collection('app_access').get());
+  await assertFails(userDb.collection('app_access').get());
+  await assertSucceeds(adminDb.collection('app_access').get());
+});
+
+test('3h. Unauthenticated users cannot read /app_control/global or /app_access/{uid}', async () => {
+  await setGlobalControl(true);
+  await setUserAccess('nurse_a', true);
+
+  const unauthedDb = getUnauthedDb();
+  await assertFails(unauthedDb.collection('app_control').doc('global').get());
+  await assertFails(unauthedDb.collection('app_access').doc('nurse_a').get());
+});
+
 // =============================================================================
 // 4. Revoked User Access
 // =============================================================================
@@ -354,6 +412,37 @@ test('6c. User cannot forge duty data with mismatched ownerUid or ID', async () 
   await assertFails(dutyRef2.set(mismatchedId));
 });
 
+test('6d. Nested user subcollections (profile, settings, staff, rosterImports) are strictly isolated', async () => {
+  await setGlobalControl(true);
+
+  // Seed nurse_b subdocuments via privileged API
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const db = context.firestore();
+    await db.collection('users').doc('nurse_b').collection('profile').doc('main').set({ name: 'Nurse B' });
+    await db.collection('users').doc('nurse_b').collection('settings').doc('prefs').set({ theme: 'dark' });
+    await db.collection('users').doc('nurse_b').collection('staff').doc('staff_1').set({ staffName: 'Colleague' });
+    await db.collection('users').doc('nurse_b').collection('rosterImports').doc('import_1').set({ timestamp: Date.now() });
+  });
+
+  const userDb = getUserDb('nurse_a');
+  const unauthedDb = getUnauthedDb();
+
+  // nurse_a cannot read nurse_b's profile, settings, staff, or rosterImports
+  await assertFails(userDb.collection('users').doc('nurse_b').collection('profile').doc('main').get());
+  await assertFails(userDb.collection('users').doc('nurse_b').collection('settings').doc('prefs').get());
+  await assertFails(userDb.collection('users').doc('nurse_b').collection('staff').doc('staff_1').get());
+  await assertFails(userDb.collection('users').doc('nurse_b').collection('rosterImports').doc('import_1').get());
+
+  // unauthenticated user cannot read any nested user data
+  await assertFails(unauthedDb.collection('users').doc('nurse_b').collection('profile').doc('main').get());
+  await assertFails(unauthedDb.collection('users').doc('nurse_b').collection('settings').doc('prefs').get());
+
+  // nurse_a can read and write their own nested data
+  const ownProfile = userDb.collection('users').doc('nurse_a').collection('profile').doc('main');
+  await assertSucceeds(ownProfile.set({ name: 'Nurse A' }));
+  await assertSucceeds(ownProfile.get());
+});
+
 // =============================================================================
 // 7. Published Roster Reads & Non-Admin Mutations
 // =============================================================================
@@ -387,6 +476,28 @@ test('7b. Normal user CANNOT create, update, or delete monthly rosters', async (
   const draftRef = userDb.collection('monthly_rosters').doc('2026_11');
 
   await assertFails(draftRef.set(validDraftRoster('2026_11')));
+});
+
+test('7c. Unauthenticated users cannot read monthly rosters or user duties', async () => {
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const db = context.firestore();
+    await db.collection('app_control').doc('global').set({
+      enabled: true,
+      message: 'All systems nominal',
+      updatedAt: Date.now(),
+      updatedByUid: 'admin_setup',
+      minimumSupportedVersion: 1,
+    });
+    await db.collection('monthly_rosters').doc('2026_10')
+      .set(validPublishedRoster('2026_10', 'admin_1'));
+    await db.collection('users').doc('nurse_a').collection('duties').doc('duty_1')
+      .set(validDuty('duty_1', 'nurse_a'));
+  });
+
+  const unauthedDb = getUnauthedDb();
+  await assertFails(unauthedDb.collection('monthly_rosters').doc('2026_10').get());
+  await assertFails(unauthedDb.collection('monthly_rosters').get());
+  await assertFails(unauthedDb.collection('users').doc('nurse_a').collection('duties').doc('duty_1').get());
 });
 
 // =============================================================================
@@ -462,4 +573,23 @@ test('9. No client app (even admin) can write to /admins collection', async () =
   const userDb = getUserDb('nurse_a');
   const selfAdminRef = userDb.collection('admins').doc('nurse_a');
   await assertFails(selfAdminRef.set({ active: true }));
+});
+
+test('9b. Unauthenticated and non-admin users cannot read other admin documents', async () => {
+  await setAdmin('admin_user');
+
+  const unauthedDb = getUnauthedDb();
+  const userDb = getUserDb('nurse_a');
+  const adminDb = getUserDb('admin_user');
+
+  // Unauthenticated cannot read admin doc
+  await assertFails(unauthedDb.collection('admins').doc('admin_user').get());
+
+  // Non-admin cannot read other user's admin doc or list admin collection
+  await assertFails(userDb.collection('admins').doc('admin_user').get());
+  await assertFails(userDb.collection('admins').get());
+
+  // Admin CAN read admin doc and list admin collection
+  await assertSucceeds(adminDb.collection('admins').doc('admin_user').get());
+  await assertSucceeds(adminDb.collection('admins').get());
 });
