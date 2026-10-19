@@ -20,6 +20,7 @@ import com.nxtshift.app.domain.SyncStatus;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -39,7 +40,7 @@ public class DutyRepository {
 
     private final DutyDao dutyDao;
     private final FirestoreService firestoreService;
-    private final ExecutorService diskExecutor;
+    private final Executor diskExecutor;
     private final Handler mainHandler;
     private AccessControlRepository accessControlRepository;
     private ListenerRegistration activeFirestoreListener;
@@ -69,11 +70,16 @@ public class DutyRepository {
     }
 
     public DutyRepository(DutyDao dutyDao, FirestoreService firestoreService, AccessControlRepository accessControlRepository) {
+        this(dutyDao, firestoreService, accessControlRepository, Executors.newSingleThreadExecutor(), new Handler(Looper.getMainLooper()));
+    }
+
+    public DutyRepository(DutyDao dutyDao, FirestoreService firestoreService, AccessControlRepository accessControlRepository,
+                          Executor diskExecutor, Handler mainHandler) {
         this.dutyDao = dutyDao;
         this.firestoreService = firestoreService;
         this.accessControlRepository = accessControlRepository;
-        this.diskExecutor = Executors.newSingleThreadExecutor();
-        this.mainHandler = new Handler(Looper.getMainLooper());
+        this.diskExecutor = diskExecutor != null ? diskExecutor : Executors.newSingleThreadExecutor();
+        this.mainHandler = mainHandler;
     }
 
     public void setAccessControlRepository(AccessControlRepository accessControlRepository) {
@@ -343,7 +349,11 @@ public class DutyRepository {
 
                 final BulkImportResult result = new BulkImportResult(toInsert.size(), created, updated, skipped);
                 if (callback != null) {
-                    mainHandler.post(() -> callback.onComplete(result));
+                    if (mainHandler == null || Looper.getMainLooper() == null) {
+                        callback.onComplete(result);
+                    } else {
+                        mainHandler.post(() -> callback.onComplete(result));
+                    }
                 }
 
                 if (!toInsert.isEmpty()) {
@@ -351,30 +361,52 @@ public class DutyRepository {
                     for (DutyEntity entity : toInsert) {
                         dutiesToUpload.add(entity.toDomain());
                     }
-                    firestoreService.uploadDutiesBatch(dutiesToUpload, new FirestoreService.FirestoreCallback<Void>() {
-                        @Override
-                        public void onSuccess(Void res) {
-                            diskExecutor.execute(() -> {
-                                for (DutyEntity entity : toInsert) {
-                                    entity.setSyncStatus(SyncStatus.SYNCED.name());
-                                }
-                                dutyDao.insertOrReplaceAll(toInsert);
-                                Log.d(TAG, "Imported " + result.totalImported + " duties synced to cloud");
-                            });
-                        }
+                    if (accessControlRepository != null) {
+                        accessControlRepository.checkCloudAccess(new AccessControlRepository.AccessCheckCallback() {
+                            @Override
+                            public void onAllowed() {
+                                uploadImportedDutiesToFirestore(toInsert, dutiesToUpload, result.totalImported);
+                            }
 
-                        @Override
-                        public void onError(Exception e) {
-                            Log.w(TAG, "Cloud sync for imported duties queued: " + e.getMessage());
-                        }
-                    });
+                            @Override
+                            public void onBlocked(AccessState state, String message) {
+                                Log.w(TAG, "Roster import cloud upload blocked by access control: " + state + " - " + message);
+                            }
+                        });
+                    } else {
+                        uploadImportedDutiesToFirestore(toInsert, dutiesToUpload, result.totalImported);
+                    }
                 }
 
             } catch (Exception e) {
                 Log.e(TAG, "Failed importing roster duties", e);
                 if (callback != null) {
-                    mainHandler.post(() -> callback.onError(e));
+                    if (mainHandler == null || Looper.getMainLooper() == null) {
+                        callback.onError(e);
+                    } else {
+                        mainHandler.post(() -> callback.onError(e));
+                    }
                 }
+            }
+        });
+    }
+
+    private void uploadImportedDutiesToFirestore(final List<DutyEntity> toInsert, final List<Duty> dutiesToUpload, final int totalImported) {
+        firestoreService.uploadDutiesBatch(dutiesToUpload, new FirestoreService.FirestoreCallback<Void>() {
+            @Override
+            public void onSuccess(Void res) {
+                diskExecutor.execute(() -> {
+                    for (DutyEntity entity : toInsert) {
+                        entity.setSyncStatus(SyncStatus.SYNCED.name());
+                    }
+                    dutyDao.insertOrReplaceAll(toInsert);
+                    Log.d(TAG, "Imported " + totalImported + " duties synced to cloud");
+                });
+            }
+
+            @Override
+            public void onError(Exception e) {
+                Log.w(TAG, "Cloud sync for imported duties queued: " + e.getMessage());
             }
         });
     }

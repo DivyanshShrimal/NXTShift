@@ -13,7 +13,9 @@ import com.google.firebase.firestore.DocumentSnapshot;
 import com.google.firebase.firestore.FirebaseFirestore;
 import com.google.firebase.firestore.Query;
 import com.google.firebase.firestore.QuerySnapshot;
+import com.nxtshift.app.data.model.AccessState;
 import com.nxtshift.app.data.model.MonthlyRoster;
+import com.nxtshift.app.data.repository.AccessControlRepository;
 
 import java.util.Map;
 
@@ -30,6 +32,7 @@ public class CentralRosterService {
     private final FirebaseFirestore db;
     private final FirebaseAuth auth;
     private final Handler mainHandler;
+    private AccessControlRepository accessControlRepository;
 
     public interface Callback<T> {
         void onSuccess(T result);
@@ -37,16 +40,31 @@ public class CentralRosterService {
     }
 
     public CentralRosterService() {
-        this.db = FirebaseFirestore.getInstance();
-        this.auth = FirebaseAuth.getInstance();
-        this.mainHandler = new Handler(Looper.getMainLooper());
+        this(FirebaseFirestore.getInstance(), FirebaseAuth.getInstance(), null);
+    }
+
+    public CentralRosterService(AccessControlRepository accessControlRepository) {
+        this(FirebaseFirestore.getInstance(), FirebaseAuth.getInstance(), accessControlRepository);
     }
 
     // Testing / Dependency Injection constructor
     public CentralRosterService(FirebaseFirestore db, FirebaseAuth auth) {
+        this(db, auth, null);
+    }
+
+    public CentralRosterService(FirebaseFirestore db, FirebaseAuth auth, AccessControlRepository accessControlRepository) {
         this.db = db;
         this.auth = auth;
+        this.accessControlRepository = accessControlRepository;
         this.mainHandler = new Handler(Looper.getMainLooper());
+    }
+
+    public void setAccessControlRepository(AccessControlRepository accessControlRepository) {
+        this.accessControlRepository = accessControlRepository;
+    }
+
+    public AccessControlRepository getAccessControlRepository() {
+        return accessControlRepository;
     }
 
     public String getCurrentUserUid() {
@@ -149,16 +167,71 @@ public class CentralRosterService {
     }
 
     /**
+     * Verifies both global availability and individual user authorization before executing administrative operations.
+     * Fails closed on any network error, missing document, malformed data, or revocation.
+     */
+    private void verifyAccessBeforeOperation(@NonNull final Callback<?> callback, @NonNull final Runnable onAllowed) {
+        String uid = getCurrentUserUid();
+        if (uid == null || uid.trim().isEmpty()) {
+            postError(callback, new SecurityException("Operation blocked: No authenticated user session found."));
+            return;
+        }
+
+        if (accessControlRepository != null) {
+            accessControlRepository.checkCloudAccess(new AccessControlRepository.AccessCheckCallback() {
+                @Override
+                public void onAllowed() {
+                    onAllowed.run();
+                }
+
+                @Override
+                public void onBlocked(AccessState state, String message) {
+                    postError(callback, new SecurityException("Operation blocked by access control: " + state + " - " + message));
+                }
+            });
+            return;
+        }
+
+        // Direct fail-closed check against Firestore when accessControlRepository is not injected
+        db.collection("app_control").document("global").get()
+                .addOnSuccessListener(globalDoc -> {
+                    if (globalDoc == null || !globalDoc.exists()) {
+                        postError(callback, new IllegalStateException("Operation blocked: Global control document (/app_control/global) does not exist."));
+                        return;
+                    }
+                    Boolean globalEnabled = globalDoc.getBoolean("enabled");
+                    if (!Boolean.TRUE.equals(globalEnabled)) {
+                        String msg = globalDoc.getString("message");
+                        String errorMsg = (msg != null && !msg.isEmpty()) ? msg : "Application is in global maintenance mode.";
+                        postError(callback, new IllegalStateException("Operation blocked: " + errorMsg));
+                        return;
+                    }
+
+                    // Global is enabled; now verify administrator is not individually revoked (/app_access/{uid})
+                    db.collection("app_access").document(uid).get()
+                            .addOnSuccessListener(userDoc -> {
+                                if (userDoc != null && userDoc.exists()) {
+                                    Boolean userEnabled = userDoc.getBoolean("enabled");
+                                    if (Boolean.FALSE.equals(userEnabled)) {
+                                        String reason = userDoc.getString("reason");
+                                        String errorReason = (reason != null && !reason.isEmpty()) ? reason : "Administrative access has been revoked.";
+                                        postError(callback, new SecurityException("Operation blocked: " + errorReason));
+                                        return;
+                                    }
+                                }
+                                onAllowed.run();
+                            })
+                            .addOnFailureListener(e -> postError(callback, new SecurityException("Operation blocked: Unable to verify user access authorization: " + e.getMessage(), e)));
+                })
+                .addOnFailureListener(e -> postError(callback, new SecurityException("Operation blocked: Unable to verify global application status: " + e.getMessage(), e)));
+    }
+
+    /**
      * Admin action: Saves roster draft without publishing.
+     * Enforces fail-closed access gating on global and user access.
      */
     public void saveDraftRoster(@NonNull MonthlyRoster roster, @NonNull final Callback<Void> callback) {
-        db.collection("app_control").document("global").get().addOnSuccessListener(globalDoc -> {
-            if (globalDoc != null && globalDoc.exists() && Boolean.FALSE.equals(globalDoc.getBoolean("enabled"))) {
-                postError(callback, new IllegalStateException("Draft save blocked: Application is in global maintenance mode."));
-                return;
-            }
-            executeSaveDraftRoster(roster, callback);
-        }).addOnFailureListener(e -> executeSaveDraftRoster(roster, callback));
+        verifyAccessBeforeOperation(callback, () -> executeSaveDraftRoster(roster, callback));
     }
 
     private void executeSaveDraftRoster(@NonNull MonthlyRoster roster, @NonNull final Callback<Void> callback) {
@@ -175,19 +248,13 @@ public class CentralRosterService {
 
     /**
      * Admin action: Publishes a monthly roster with incremental versioning.
-     * Prevents silent overwriting by fetching existing published version and incrementing version number.
+     * Enforces fail-closed access gating on global and user access.
      */
     public void publishRoster(@NonNull MonthlyRoster roster,
                               String publishedByUid,
                               String publishedByEmail,
                               @NonNull final Callback<Integer> callback) {
-        db.collection("app_control").document("global").get().addOnSuccessListener(globalDoc -> {
-            if (globalDoc != null && globalDoc.exists() && Boolean.FALSE.equals(globalDoc.getBoolean("enabled"))) {
-                postError(callback, new IllegalStateException("Publication blocked: Application is in global maintenance mode."));
-                return;
-            }
-            executePublishRoster(roster, publishedByUid, publishedByEmail, callback);
-        }).addOnFailureListener(e -> executePublishRoster(roster, publishedByUid, publishedByEmail, callback));
+        verifyAccessBeforeOperation(callback, () -> executePublishRoster(roster, publishedByUid, publishedByEmail, callback));
     }
 
     private void executePublishRoster(@NonNull MonthlyRoster roster,
@@ -233,13 +300,21 @@ public class CentralRosterService {
 
     private <T> void postSuccess(Callback<T> callback, T result) {
         if (callback != null) {
-            mainHandler.post(() -> callback.onSuccess(result));
+            if (mainHandler == null || Looper.getMainLooper() == null) {
+                callback.onSuccess(result);
+            } else {
+                mainHandler.post(() -> callback.onSuccess(result));
+            }
         }
     }
 
     private <T> void postError(Callback<T> callback, Exception e) {
         if (callback != null) {
-            mainHandler.post(() -> callback.onError(e));
+            if (mainHandler == null || Looper.getMainLooper() == null) {
+                callback.onError(e);
+            } else {
+                mainHandler.post(() -> callback.onError(e));
+            }
         }
     }
 }

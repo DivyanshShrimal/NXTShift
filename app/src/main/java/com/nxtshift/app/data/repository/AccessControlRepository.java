@@ -43,7 +43,7 @@ public class AccessControlRepository {
     private final FirebaseAuth auth;
     private final Handler mainHandler;
 
-    private final MutableLiveData<AccessState> accessStateLiveData = new MutableLiveData<>(AccessState.ALLOWED);
+    private final MutableLiveData<AccessState> accessStateLiveData = new MutableLiveData<>(AccessState.OFFLINE_UNVERIFIED);
     private final MutableLiveData<GlobalAccessConfig> globalConfigLiveData = new MutableLiveData<>();
     private final MutableLiveData<UserAccessRecord> userAccessLiveData = new MutableLiveData<>();
 
@@ -54,6 +54,8 @@ public class AccessControlRepository {
     private GlobalAccessConfig currentGlobalConfig;
     private UserAccessRecord currentUserAccess;
     private boolean isOffline = false;
+    private boolean isGlobalServerConfirmed = false;
+    private boolean isUserServerConfirmed = false;
 
     public interface AccessCheckCallback {
         void onAllowed();
@@ -99,13 +101,13 @@ public class AccessControlRepository {
     }
 
     private AccessState testAccessState = null;
+    private AccessState currentEvaluatedState = AccessState.OFFLINE_UNVERIFIED;
 
     public synchronized AccessState getCurrentAccessState() {
         if (testAccessState != null) {
             return testAccessState;
         }
-        AccessState state = accessStateLiveData.getValue();
-        return state != null ? state : AccessState.ALLOWED;
+        return currentEvaluatedState;
     }
 
     public synchronized GlobalAccessConfig getCurrentGlobalConfig() {
@@ -114,6 +116,10 @@ public class AccessControlRepository {
 
     public synchronized UserAccessRecord getCurrentUserAccess() {
         return currentUserAccess;
+    }
+
+    public synchronized boolean isServerConfirmed() {
+        return isGlobalServerConfirmed && isUserServerConfirmed && !isOffline;
     }
 
     /**
@@ -131,6 +137,9 @@ public class AccessControlRepository {
 
         stopMonitoring();
         this.monitoredUid = uid;
+        this.isGlobalServerConfirmed = false;
+        this.isUserServerConfirmed = false;
+        postState(AccessState.OFFLINE_UNVERIFIED);
 
         // 1. Observe /app_control/global
         DocumentReference globalRef = db.collection(COLLECTION_APP_CONTROL).document(DOC_GLOBAL);
@@ -166,10 +175,18 @@ public class AccessControlRepository {
             userListenerRegistration = null;
         }
         monitoredUid = null;
+        isGlobalServerConfirmed = false;
+        isUserServerConfirmed = false;
+        isOffline = false;
     }
 
-    private synchronized void handleGlobalSnapshot(DocumentSnapshot snapshot) {
-        isOffline = false;
+    public synchronized void handleGlobalSnapshot(DocumentSnapshot snapshot) {
+        boolean fromCache = (snapshot != null && snapshot.getMetadata() != null && snapshot.getMetadata().isFromCache());
+        isGlobalServerConfirmed = !fromCache;
+        if (!fromCache) {
+            isOffline = false;
+        }
+
         if (snapshot == null || !snapshot.exists()) {
             // Missing control document -> fail-closed: global disabled by default until initialized
             currentGlobalConfig = new GlobalAccessConfig(false, "Application control configuration not found.", System.currentTimeMillis(), "", 1);
@@ -181,8 +198,13 @@ public class AccessControlRepository {
         evaluateState();
     }
 
-    private synchronized void handleUserSnapshot(String uid, DocumentSnapshot snapshot) {
-        isOffline = false;
+    public synchronized void handleUserSnapshot(String uid, DocumentSnapshot snapshot) {
+        boolean fromCache = (snapshot != null && snapshot.getMetadata() != null && snapshot.getMetadata().isFromCache());
+        isUserServerConfirmed = !fromCache;
+        if (!fromCache) {
+            isOffline = false;
+        }
+
         if (snapshot == null || !snapshot.exists()) {
             // No individual revocation record -> user is permitted individually
             currentUserAccess = new UserAccessRecord(uid, true, "", System.currentTimeMillis(), "");
@@ -194,8 +216,10 @@ public class AccessControlRepository {
         evaluateState();
     }
 
-    private synchronized void handleListenerError(FirebaseFirestoreException error) {
+    public synchronized void handleListenerError(FirebaseFirestoreException error) {
         Log.w(TAG, "Access control listener notice: " + error.getMessage());
+        isGlobalServerConfirmed = false;
+        isUserServerConfirmed = false;
         if (error.getCode() == FirebaseFirestoreException.Code.UNAVAILABLE ||
                 error.getCause() instanceof FirebaseNetworkException) {
             isOffline = true;
@@ -203,6 +227,8 @@ public class AccessControlRepository {
         } else if (error.getCode() == FirebaseFirestoreException.Code.PERMISSION_DENIED) {
             // Permission denied -> fail-closed
             postState(AccessState.ERROR);
+        } else {
+            evaluateState();
         }
     }
 
@@ -210,6 +236,7 @@ public class AccessControlRepository {
      * Evaluates current access state following fail-closed security principles.
      */
     public synchronized void evaluateState() {
+        // 1. Any confirmed OR cached revocation / global maintenance mode immediately blocks cloud access (fail-closed)
         if (currentGlobalConfig != null && !currentGlobalConfig.isEnabled()) {
             postState(AccessState.GLOBAL_DISABLED);
             return;
@@ -220,22 +247,31 @@ public class AccessControlRepository {
             return;
         }
 
-        if (isOffline) {
+        // 2. If offline, or if either global or user state has not been confirmed directly by the live server,
+        // cloud operations must remain unverified and blocked. Cached 'ALLOWED' data is never trusted.
+        if (isOffline || !isGlobalServerConfirmed || !isUserServerConfirmed) {
             postState(AccessState.OFFLINE_UNVERIFIED);
             return;
         }
 
-        if (currentGlobalConfig == null) {
-            // Waiting for initial fetch or offline
+        if (currentGlobalConfig == null || currentUserAccess == null) {
             postState(AccessState.OFFLINE_UNVERIFIED);
             return;
         }
 
+        // 3. Only when both global availability and user authorization are confirmed enabled by the live server
         postState(AccessState.ALLOWED);
     }
 
     private void postState(AccessState state) {
-        mainHandler.post(() -> accessStateLiveData.setValue(state));
+        this.currentEvaluatedState = state;
+        if (mainHandler == null || Looper.getMainLooper() == null) {
+            try {
+                accessStateLiveData.setValue(state);
+            } catch (Exception ignored) {}
+        } else {
+            mainHandler.post(() -> accessStateLiveData.setValue(state));
+        }
     }
 
     /**
@@ -287,6 +323,15 @@ public class AccessControlRepository {
 
     public synchronized void setUserAccessForTesting(UserAccessRecord record) {
         this.currentUserAccess = record;
+    }
+
+    public synchronized void setServerConfirmedForTesting(boolean globalConfirmed, boolean userConfirmed) {
+        this.isGlobalServerConfirmed = globalConfirmed;
+        this.isUserServerConfirmed = userConfirmed;
+    }
+
+    public synchronized void setOfflineForTesting(boolean offline) {
+        this.isOffline = offline;
     }
 
     // --- Administrator Remote Control APIs ---

@@ -71,8 +71,8 @@ public class DashboardActivity extends AppCompatActivity {
 
         currentUid = authRepository.getCurrentUid();
         dutyRepository = DutyRepository.getInstance(this);
-        centralRosterService = new CentralRosterService();
         accessControlRepository = AccessControlRepository.getInstance(this);
+        centralRosterService = new CentralRosterService(accessControlRepository);
 
         binding = ActivityDashboardBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());

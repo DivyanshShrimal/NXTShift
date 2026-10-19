@@ -75,8 +75,8 @@ public class AdminDashboardActivity extends AppCompatActivity {
 
         currentUid = authRepository.getCurrentUid();
         currentEmail = authRepository.getCurrentEmail();
-        centralRosterService = new CentralRosterService();
         accessControlRepository = AccessControlRepository.getInstance(this);
+        centralRosterService = new CentralRosterService(accessControlRepository);
 
         // Initialize default month/year (current month)
         LocalDate now = LocalDate.now();

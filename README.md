@@ -109,14 +109,14 @@ NXTShift incorporates a centralized, fail-closed Remote Access Control system en
 1. **Global Application Control (`/app_control/global`)**
    - `enabled` (boolean): `true` allows online operations; `false` activates maintenance mode.
    - `message` (string): Optional user-facing notification displayed on the maintenance screen.
-   - `updatedAt` (number): Timestamp of the last change.
+   - `updatedAt` (number): Numeric epoch timestamp in milliseconds (e.g. `1774000000000`), matching client `long` and `data.updatedAt is number`.
    - `updatedByUid` (string): UID of the administrator who applied the change.
    - `minimumSupportedVersion` (number): Optional client version enforcement.
 
 2. **Individual User Access (`/app_access/{uid}`)**
    - `enabled` (boolean): `false` immediately revokes cloud sync for that specific UID.
    - `reason` (string): Non-sensitive explanation for the revocation.
-   - `updatedAt` (number): Timestamp of revocation/restoration.
+   - `updatedAt` (number): Numeric epoch timestamp in milliseconds (e.g. `1774000000000`) of revocation/restoration.
    - `updatedByUid` (string): UID of the administrator who performed the action.
    *(Note: Users without an `/app_access` document are permitted by default unless revoked).*
 
@@ -148,10 +148,12 @@ NXTShift incorporates a centralized, fail-closed Remote Access Control system en
 
 1. **Initial Setup in Firebase Console:**
    - Create document `/app_control/global` with fields:
-     - `enabled: true`
-     - `message: "All services operational"`
-     - `updatedAt: <current timestamp>`
-   - To designate an admin, create document `/admins/<ADMIN_UID>` with field `{ active: true }`.
+     - `enabled`: `true` (boolean)
+     - `message`: `"All services operational"` (string)
+     - `updatedAt`: `1774000000000` (number — store as integer/number epoch milliseconds, not Firestore Timestamp)
+     - `updatedByUid`: `"INITIAL_ADMIN_UID"` (string)
+     - `minimumSupportedVersion`: `1` (number)
+   - To designate an admin, create document `/admins/<ADMIN_UID>` with field `{ "active": true }`.
 2. **In-App Administration:**
    - Sign in with an authorized administrator account.
    - Open **Admin Roster Portal** from the Dashboard.

@@ -100,6 +100,8 @@ public class UserAccessRecord {
         Object updatedObj = map.get("updatedAt");
         if (updatedObj instanceof Number) {
             record.setUpdatedAt(((Number) updatedObj).longValue());
+        } else if (updatedObj instanceof com.google.firebase.Timestamp) {
+            record.setUpdatedAt(((com.google.firebase.Timestamp) updatedObj).toDate().getTime());
         }
 
         Object updatedByObj = map.get("updatedByUid");

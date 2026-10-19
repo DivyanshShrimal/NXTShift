@@ -120,12 +120,12 @@ public class FirestoreRulesSecurityTest {
         }
 
         boolean canCreateOrUpdateMonthlyRoster(Map<String, Object> data, String rosterId) {
-            if (!isAdmin() || !isGlobalEnabled()) return false;
+            if (!isAdmin() || !isAccessPermitted(uid)) return false;
             return isValidMonthlyRoster(data, rosterId, uid);
         }
 
         boolean canDeleteMonthlyRoster() {
-            return isAdmin() && isGlobalEnabled();
+            return isAdmin() && isAccessPermitted(uid);
         }
 
         // Rule Validation: isValidMonthlyRoster(data, rosterId)
@@ -321,6 +321,24 @@ public class FirestoreRulesSecurityTest {
                 adminUserViaCollection.canCreateOrUpdateMonthlyRoster(published, "2026_10"));
         assertFalse("Admin CANNOT delete roster when global access is disabled",
                 adminUserViaCollection.canDeleteMonthlyRoster());
+    }
+
+    @Test
+    public void testRemoteAccess_RevokedAdminRosterPublishingBlocked() {
+        Map<String, Object> draft = createValidRosterMap("2026_10_draft", "DRAFT");
+        Map<String, Object> published = createValidRosterMap("2026_10", "PUBLISHED");
+
+        // Revoke the admin user specifically in /app_access/{adminUid}
+        adminUserViaCollection.userAccessDocs.put(ADMIN_UID, false);
+
+        assertFalse("Revoked admin CANNOT save draft roster",
+                adminUserViaCollection.canCreateOrUpdateMonthlyRoster(draft, "2026_10_draft"));
+        assertFalse("Revoked admin CANNOT publish roster",
+                adminUserViaCollection.canCreateOrUpdateMonthlyRoster(published, "2026_10"));
+        assertFalse("Revoked admin CANNOT delete roster",
+                adminUserViaCollection.canDeleteMonthlyRoster());
+        assertFalse("Revoked admin CANNOT read rosters",
+                adminUserViaCollection.canGetMonthlyRoster(published));
     }
 
     @Test

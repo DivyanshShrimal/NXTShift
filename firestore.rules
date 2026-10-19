@@ -110,8 +110,8 @@ service cloud.firestore {
       allow list: if isAuthenticated() && isAccessPermitted(request.auth.uid) && (
         resource.data.status == 'PUBLISHED' || isAdmin()
       );
-      allow create, update: if isAdmin() && isGlobalEnabled() && isValidMonthlyRoster(request.resource.data, rosterId);
-      allow delete: if isAdmin() && isGlobalEnabled();
+      allow create, update: if isAdmin() && isAccessPermitted(request.auth.uid) && isValidMonthlyRoster(request.resource.data, rosterId);
+      allow delete: if isAdmin() && isAccessPermitted(request.auth.uid);
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
