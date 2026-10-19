@@ -10,11 +10,13 @@ import androidx.lifecycle.LiveData;
 import com.nxtshift.app.data.local.NXTShiftDatabase;
 import com.nxtshift.app.data.local.StaffDao;
 import com.nxtshift.app.data.local.StaffMemberEntity;
+import com.nxtshift.app.data.model.AccessState;
 import com.nxtshift.app.data.remote.FirestoreService;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -28,8 +30,9 @@ public class StaffRepository {
 
     private final StaffDao staffDao;
     private final FirestoreService firestoreService;
-    private final ExecutorService diskExecutor;
+    private final Executor diskExecutor;
     private final Handler mainHandler;
+    private AccessControlRepository accessControlRepository;
 
     public interface StaffCallback<T> {
         void onComplete(T result);
@@ -42,7 +45,8 @@ public class StaffRepository {
                 if (INSTANCE == null) {
                     INSTANCE = new StaffRepository(
                             NXTShiftDatabase.getInstance(context).staffDao(),
-                            new FirestoreService()
+                            new FirestoreService(),
+                            AccessControlRepository.getInstance(context)
                     );
                 }
             }
@@ -51,10 +55,28 @@ public class StaffRepository {
     }
 
     public StaffRepository(StaffDao staffDao, FirestoreService firestoreService) {
+        this(staffDao, firestoreService, null);
+    }
+
+    public StaffRepository(StaffDao staffDao, FirestoreService firestoreService, AccessControlRepository accessControlRepository) {
+        this(staffDao, firestoreService, accessControlRepository, Executors.newSingleThreadExecutor(), new Handler(Looper.getMainLooper()));
+    }
+
+    public StaffRepository(StaffDao staffDao, FirestoreService firestoreService, AccessControlRepository accessControlRepository,
+                           Executor diskExecutor, Handler mainHandler) {
         this.staffDao = staffDao;
         this.firestoreService = firestoreService;
-        this.diskExecutor = Executors.newSingleThreadExecutor();
-        this.mainHandler = new Handler(Looper.getMainLooper());
+        this.accessControlRepository = accessControlRepository;
+        this.diskExecutor = diskExecutor != null ? diskExecutor : Executors.newSingleThreadExecutor();
+        this.mainHandler = mainHandler;
+    }
+
+    public void setAccessControlRepository(AccessControlRepository accessControlRepository) {
+        this.accessControlRepository = accessControlRepository;
+    }
+
+    public AccessControlRepository getAccessControlRepository() {
+        return accessControlRepository;
     }
 
     public LiveData<List<StaffMemberEntity>> getAllStaffLiveData(String ownerUid) {
@@ -84,6 +106,9 @@ public class StaffRepository {
         diskExecutor.execute(() -> {
             try {
                 List<StaffMemberEntity> existingList = staffDao.getAllStaffDirect(ownerUid);
+                if (existingList == null) {
+                    existingList = Collections.emptyList();
+                }
                 List<StaffMemberEntity> toSave = new ArrayList<>();
 
                 for (StaffMemberEntity discovered : discoveredList) {
@@ -114,28 +139,54 @@ public class StaffRepository {
 
                 staffDao.insertOrReplaceAll(toSave);
                 final int count = toSave.size();
-                mainHandler.post(() -> {
+                if (mainHandler == null || Looper.getMainLooper() == null) {
                     if (callback != null) callback.onComplete(count);
-                });
+                } else {
+                    mainHandler.post(() -> {
+                        if (callback != null) callback.onComplete(count);
+                    });
+                }
 
-                // Batch sync to Firestore
-                firestoreService.uploadStaffBatch(ownerUid, toSave, new FirestoreService.FirestoreCallback<Void>() {
-                    @Override
-                    public void onSuccess(Void result) {
-                        Log.d(TAG, "Successfully synced " + count + " staff members to Firestore");
-                    }
+                // Batch sync to Firestore gated by access control
+                if (accessControlRepository != null) {
+                    accessControlRepository.checkCloudAccess(new AccessControlRepository.AccessCheckCallback() {
+                        @Override
+                        public void onAllowed() {
+                            uploadStaffBatchToFirestore(ownerUid, toSave, count);
+                        }
 
-                    @Override
-                    public void onError(Exception e) {
-                        Log.w(TAG, "Offline or pending sync for staff members: " + e.getMessage());
-                    }
-                });
+                        @Override
+                        public void onBlocked(AccessState state, String message) {
+                            Log.w(TAG, "Staff directory cloud upload blocked by access control: " + state + " - " + message);
+                        }
+                    });
+                } else {
+                    uploadStaffBatchToFirestore(ownerUid, toSave, count);
+                }
 
             } catch (Exception e) {
                 Log.e(TAG, "Error saving discovered staff", e);
-                mainHandler.post(() -> {
+                if (mainHandler == null || Looper.getMainLooper() == null) {
                     if (callback != null) callback.onError(e);
-                });
+                } else {
+                    mainHandler.post(() -> {
+                        if (callback != null) callback.onError(e);
+                    });
+                }
+            }
+        });
+    }
+
+    private void uploadStaffBatchToFirestore(String ownerUid, List<StaffMemberEntity> toSave, int count) {
+        firestoreService.uploadStaffBatch(ownerUid, toSave, new FirestoreService.FirestoreCallback<Void>() {
+            @Override
+            public void onSuccess(Void result) {
+                Log.d(TAG, "Successfully synced " + count + " staff members to Firestore");
+            }
+
+            @Override
+            public void onError(Exception e) {
+                Log.w(TAG, "Offline or pending sync for staff members: " + e.getMessage());
             }
         });
     }
