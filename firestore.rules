@@ -31,7 +31,7 @@ service cloud.firestore {
     // Client-side role claims or request data fields are NEVER trusted as the security boundary.
     function isAdmin() {
       return isAuthenticated() && (
-        request.auth.token.admin == true ||
+        request.auth.token.get('admin', false) == true ||
         exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
     }
