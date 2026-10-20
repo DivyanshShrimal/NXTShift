@@ -9,6 +9,7 @@ import com.google.firebase.auth.FirebaseAuthInvalidCredentialsException;
 import com.google.firebase.auth.FirebaseAuthUserCollisionException;
 import com.google.firebase.auth.FirebaseAuthWeakPasswordException;
 import com.google.firebase.auth.FirebaseUser;
+import com.nxtshift.app.notifications.ShiftNotificationManager;
 
 /**
  * Handles Firebase Email/Password Authentication: registration, login, password reset,
@@ -18,6 +19,7 @@ public class AuthRepository {
     private static final String TAG = "AuthRepository";
     private static volatile AuthRepository INSTANCE;
 
+    private final Context context;
     private final FirebaseAuth auth;
     private final DutyRepository dutyRepository;
 
@@ -37,9 +39,11 @@ public class AuthRepository {
         if (INSTANCE == null) {
             synchronized (AuthRepository.class) {
                 if (INSTANCE == null) {
+                    Context appCtx = context.getApplicationContext();
                     INSTANCE = new AuthRepository(
+                            appCtx,
                             FirebaseAuth.getInstance(),
-                            DutyRepository.getInstance(context)
+                            DutyRepository.getInstance(appCtx)
                     );
                 }
             }
@@ -47,9 +51,14 @@ public class AuthRepository {
         return INSTANCE;
     }
 
-    public AuthRepository(FirebaseAuth auth, DutyRepository dutyRepository) {
+    public AuthRepository(Context context, FirebaseAuth auth, DutyRepository dutyRepository) {
+        this.context = context != null ? context.getApplicationContext() : null;
         this.auth = auth;
         this.dutyRepository = dutyRepository;
+    }
+
+    public AuthRepository(FirebaseAuth auth, DutyRepository dutyRepository) {
+        this(null, auth, dutyRepository);
     }
 
     // ── Session State ──────────────────────────────────────────────────────────
@@ -208,6 +217,9 @@ public class AuthRepository {
      */
     public void signOut(final AuthActionCallback callback) {
         final String uid = getCurrentUid();
+        if (context != null) {
+            ShiftNotificationManager.cancelAllNotifications(context);
+        }
         dutyRepository.clearLocalCacheForAccount(uid, new DutyRepository.RepositoryCallback<Void>() {
             @Override
             public void onComplete(Void result) {
@@ -238,6 +250,9 @@ public class AuthRepository {
         }
 
         final String uid = user.getUid();
+        if (context != null) {
+            ShiftNotificationManager.cancelAllNotifications(context);
+        }
         dutyRepository.deleteEntireAccountData(uid, new DutyRepository.RepositoryCallback<Void>() {
             @Override
             public void onComplete(Void result) {

@@ -61,6 +61,12 @@ public interface DutyDao {
     @Query("DELETE FROM duties WHERE ownerUid = :ownerUid")
     int deleteAllByOwner(String ownerUid);
 
+    @Query("SELECT * FROM duties WHERE ownerUid = :ownerUid AND dutyDate = :dutyDate ORDER BY createdAt ASC")
+    List<DutyEntity> getDutiesForDateDirect(String ownerUid, String dutyDate);
+
+    @Query("DELETE FROM duties WHERE ownerUid = :ownerUid AND id IN (:ids)")
+    int deleteDutiesByIds(String ownerUid, List<String> ids);
+
     @Transaction
     default void replaceRangeWithDuties(String ownerUid, String startDate, String endDate, List<DutyEntity> newDuties) {
         deleteRangeByOwner(ownerUid, startDate, endDate);

@@ -11,6 +11,8 @@ import com.nxtshift.app.domain.DutyStatus;
 import com.nxtshift.app.domain.ShiftType;
 import com.nxtshift.app.domain.SyncStatus;
 
+import java.util.Locale;
+
 /**
  * Room entity representing an isolated duty record stored locally on the device.
  * Indexed by ownerUid and dutyDate for immediate access and multi-account isolation.
@@ -300,5 +302,18 @@ public class DutyEntity {
 
     public void setSyncStatus(@NonNull String syncStatus) {
         this.syncStatus = syncStatus;
+    }
+
+    public static boolean isRosterGenerated(String notes) {
+        if (notes == null || notes.trim().isEmpty()) {
+            return false;
+        }
+        String lower = notes.toLowerCase(Locale.US);
+        return lower.contains("imported") || lower.contains("published roster")
+                || lower.contains("unrecognized shift timing") || lower.contains("roster");
+    }
+
+    public boolean isRosterGenerated() {
+        return isRosterGenerated(notes);
     }
 }

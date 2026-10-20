@@ -3,6 +3,7 @@ package com.nxtshift.app.domain;
 import androidx.annotation.NonNull;
 import com.nxtshift.app.util.DateTimeUtils;
 import java.io.Serializable;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -240,5 +241,18 @@ public class Duty implements Serializable {
                 ", time='" + getFormattedDutyTime() + '\'' +
                 ", ward='" + wardOrDepartment + '\'' +
                 '}';
+    }
+
+    public static boolean isRosterGenerated(String notes) {
+        if (notes == null || notes.trim().isEmpty()) {
+            return false;
+        }
+        String lower = notes.toLowerCase(Locale.US);
+        return lower.contains("imported") || lower.contains("published roster")
+                || lower.contains("unrecognized shift timing") || lower.contains("roster");
+    }
+
+    public boolean isRosterGenerated() {
+        return isRosterGenerated(notes);
     }
 }

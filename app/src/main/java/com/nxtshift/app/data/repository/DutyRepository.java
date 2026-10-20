@@ -1,6 +1,7 @@
 package com.nxtshift.app.data.repository;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -16,9 +17,16 @@ import com.nxtshift.app.data.local.NXTShiftDatabase;
 import com.nxtshift.app.data.remote.FirestoreService;
 import com.nxtshift.app.domain.Duty;
 import com.nxtshift.app.domain.SyncStatus;
+import com.nxtshift.app.notifications.ShiftNotificationManager;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -36,6 +44,8 @@ public class DutyRepository {
         KEEP_EXISTING_ON_CONFLICT
     }
 
+    private final Context context;
+    private final NXTShiftDatabase database;
     private final DutyDao dutyDao;
     private final FirestoreService firestoreService;
     private final ExecutorService diskExecutor;
@@ -51,8 +61,12 @@ public class DutyRepository {
         if (INSTANCE == null) {
             synchronized (DutyRepository.class) {
                 if (INSTANCE == null) {
+                    Context appCtx = context.getApplicationContext();
+                    NXTShiftDatabase db = NXTShiftDatabase.getInstance(appCtx);
                     INSTANCE = new DutyRepository(
-                            NXTShiftDatabase.getInstance(context).dutyDao(),
+                            appCtx,
+                            db,
+                            db.dutyDao(),
                             new FirestoreService()
                     );
                 }
@@ -61,11 +75,17 @@ public class DutyRepository {
         return INSTANCE;
     }
 
-    public DutyRepository(DutyDao dutyDao, FirestoreService firestoreService) {
+    public DutyRepository(Context context, NXTShiftDatabase database, DutyDao dutyDao, FirestoreService firestoreService) {
+        this.context = context != null ? context.getApplicationContext() : null;
+        this.database = database;
         this.dutyDao = dutyDao;
         this.firestoreService = firestoreService;
         this.diskExecutor = Executors.newSingleThreadExecutor();
         this.mainHandler = new Handler(Looper.getMainLooper());
+    }
+
+    public DutyRepository(DutyDao dutyDao, FirestoreService firestoreService) {
+        this(null, null, dutyDao, firestoreService);
     }
 
     // --- Observable Queries Isolated by Owner UID ---
@@ -143,6 +163,10 @@ public class DutyRepository {
                 // 1. Save to Room immediately
                 dutyDao.insertOrReplace(DutyEntity.fromDomain(duty, duty.getOwnerUid()));
 
+                if (context != null) {
+                    ShiftNotificationManager.updatePersistentNextDutyNotification(context);
+                }
+
                 if (callback != null) {
                     mainHandler.post(() -> callback.onComplete(duty));
                 }
@@ -181,6 +205,11 @@ public class DutyRepository {
         diskExecutor.execute(() -> {
             try {
                 dutyDao.deleteDutyById(duty.getId(), duty.getOwnerUid());
+                addPendingDeletedDutyIds(duty.getOwnerUid(), Collections.singletonList(duty.getId()));
+
+                if (context != null) {
+                    ShiftNotificationManager.updatePersistentNextDutyNotification(context);
+                }
 
                 if (callback != null) {
                     mainHandler.post(() -> callback.onComplete(null));
@@ -189,12 +218,13 @@ public class DutyRepository {
                 firestoreService.deleteDuty(duty.getId(), duty.getOwnerUid(), new FirestoreService.FirestoreCallback<Void>() {
                     @Override
                     public void onSuccess(Void result) {
+                        removePendingDeletedDutyIds(duty.getOwnerUid(), Collections.singletonList(duty.getId()));
                         Log.d(TAG, "Deleted duty from Firestore: " + duty.getId());
                     }
 
                     @Override
                     public void onError(Exception e) {
-                        Log.w(TAG, "Could not delete from Firestore immediately: " + e.getMessage());
+                        Log.w(TAG, "Could not delete from Firestore immediately (queued): " + e.getMessage());
                     }
                 });
             } catch (Exception e) {
@@ -229,84 +259,159 @@ public class DutyRepository {
                                            final RepositoryCallback<BulkImportResult> callback) {
         diskExecutor.execute(() -> {
             try {
-                List<DutyEntity> toInsert = new ArrayList<>();
+                if (ownerUid == null || ownerUid.isEmpty()) {
+                    if (callback != null) {
+                        mainHandler.post(() -> callback.onError(new IllegalArgumentException("Missing owner UID for import")));
+                    }
+                    return;
+                }
+
+                if (importedDuties == null || importedDuties.isEmpty()) {
+                    final BulkImportResult emptyResult = new BulkImportResult(0, 0, 0, 0);
+                    if (callback != null) {
+                        mainHandler.post(() -> callback.onComplete(emptyResult));
+                    }
+                    return;
+                }
+
                 long now = System.currentTimeMillis();
+                List<DutyEntity> toInsert = new ArrayList<>();
+                List<String> idsToDelete = new ArrayList<>();
                 int created = 0;
                 int updated = 0;
                 int skipped = 0;
 
-                if (policy == ImportConflictPolicy.REPLACE_RANGE && startDate != null && endDate != null) {
-                    dutyDao.deleteRangeByOwner(ownerUid, startDate, endDate);
-                    for (Duty d : importedDuties) {
-                        d.setOwnerUid(ownerUid);
-                        d.setUpdatedAt(now);
-                        d.setSyncStatus(SyncStatus.PENDING_UPLOAD);
-                        toInsert.add(DutyEntity.fromDomain(d, ownerUid));
+                // 1. Group incoming duties strictly by date for this user scope
+                Map<String, Duty> incomingByDate = new LinkedHashMap<>();
+                for (Duty d : importedDuties) {
+                    if (d.getDutyDate() != null) {
+                        incomingByDate.put(d.getDutyDate(), d);
                     }
-                    dutyDao.insertOrReplaceAll(toInsert);
-                    created = toInsert.size();
-                } else if (policy == ImportConflictPolicy.KEEP_EXISTING_ON_CONFLICT) {
-                    for (Duty d : importedDuties) {
-                        d.setOwnerUid(ownerUid);
-                        d.setUpdatedAt(now);
-                        DutyEntity existing = dutyDao.getDutyForDateDirect(ownerUid, d.getDutyDate());
-                        if (existing == null) {
-                            d.setSyncStatus(SyncStatus.PENDING_UPLOAD);
-                            DutyEntity entity = DutyEntity.fromDomain(d, ownerUid);
-                            toInsert.add(entity);
-                            dutyDao.insertOrReplace(entity);
-                            created++;
-                        } else {
-                            skipped++;
-                        }
-                    }
-                } else {
-                    // MERGE_REPLACE_CONFLICTS: default
-                    for (Duty d : importedDuties) {
-                        d.setOwnerUid(ownerUid);
-                        d.setUpdatedAt(now);
-                        d.setSyncStatus(SyncStatus.PENDING_UPLOAD);
-                        DutyEntity existing = dutyDao.getDutyForDateDirect(ownerUid, d.getDutyDate());
-                        if (existing != null) {
-                            updated++;
-                            d.setId(existing.getId());
-                        } else {
-                            created++;
-                        }
-                        toInsert.add(DutyEntity.fromDomain(d, ownerUid));
-                    }
-                    dutyDao.insertOrReplaceAll(toInsert);
                 }
 
-                // Diagnostic verification: confirm all saved records can be loaded back from Room
-                for (DutyEntity entity : toInsert) {
-                    Log.i(TAG, "[RosterDiagnostic] Saved to Room: Date=" + entity.getDutyDate() + ", Shift=" + entity.getShiftType() + ", Colleagues='" + entity.getColleagues() + "'");
-                    DutyEntity reloaded = dutyDao.getDutyByIdDirect(ownerUid, entity.getId());
-                    if (reloaded != null) {
-                        Log.i(TAG, "[RosterDiagnostic] Verified loaded from Room: Date=" + reloaded.getDutyDate() + ", Shift=" + reloaded.getShiftType() + ", Colleagues='" + reloaded.getColleagues() + "'");
+                // Determine min and max covered dates
+                String minDate = startDate;
+                String maxDate = endDate;
+                if (minDate == null || maxDate == null) {
+                    for (String d : incomingByDate.keySet()) {
+                        if (minDate == null || d.compareTo(minDate) < 0) minDate = d;
+                        if (maxDate == null || d.compareTo(maxDate) > 0) maxDate = d;
+                    }
+                }
+
+                // 2. Fetch existing local duties in this range for this user only
+                List<DutyEntity> existingInRange = dutyDao.getDutiesBetweenDatesDirect(ownerUid, minDate, maxDate);
+                Map<String, List<DutyEntity>> existingByDate = new HashMap<>();
+                if (existingInRange != null) {
+                    for (DutyEntity entity : existingInRange) {
+                        existingByDate.computeIfAbsent(entity.getDutyDate(), k -> new ArrayList<>()).add(entity);
+                    }
+                }
+
+                // 3. Process every explicitly covered date
+                for (Map.Entry<String, Duty> entry : incomingByDate.entrySet()) {
+                    String date = entry.getKey();
+                    Duty incoming = entry.getValue();
+                    incoming.setOwnerUid(ownerUid);
+                    incoming.setUpdatedAt(now);
+                    incoming.setSyncStatus(SyncStatus.PENDING_UPLOAD);
+
+                    List<DutyEntity> existingOnDate = existingByDate.get(date);
+                    if (existingOnDate == null || existingOnDate.isEmpty()) {
+                        // Brand new duty for this date
+                        toInsert.add(DutyEntity.fromDomain(incoming, ownerUid));
+                        created++;
+                    } else if (policy == ImportConflictPolicy.KEEP_EXISTING_ON_CONFLICT) {
+                        // Keep existing record on conflict
+                        skipped++;
                     } else {
-                        Log.w(TAG, "[RosterDiagnostic] Room reload check failed for Date=" + entity.getDutyDate() + ", Id=" + entity.getId());
+                        // MERGE_REPLACE_CONFLICTS or REPLACE_RANGE:
+                        // Identify previous roster-generated entries vs manual entries
+                        List<DutyEntity> rosterDuties = new ArrayList<>();
+                        for (DutyEntity e : existingOnDate) {
+                            if (DutyEntity.isRosterGenerated(e.getNotes())) {
+                                rosterDuties.add(e);
+                            }
+                        }
+
+                        if (rosterDuties.isEmpty()) {
+                            // Only manual duty exists on this date -> Preserve manual duty!
+                            toInsert.add(DutyEntity.fromDomain(incoming, ownerUid));
+                            created++;
+                        } else {
+                            // Previous roster-generated duty exists: reuse ID to update cleanly in-place
+                            DutyEntity primaryRoster = rosterDuties.get(0);
+                            incoming.setId(primaryRoster.getId());
+                            toInsert.add(DutyEntity.fromDomain(incoming, ownerUid));
+                            updated++;
+
+                            // Remove any duplicate or contradictory previous roster entries on this same date
+                            for (int i = 1; i < rosterDuties.size(); i++) {
+                                idsToDelete.add(rosterDuties.get(i).getId());
+                            }
+                        }
                     }
                 }
 
-                final BulkImportResult result = new BulkImportResult(toInsert.size(), created, updated, skipped);
+                // 4. Atomic Room database write inside transaction
+                final List<DutyEntity> finalToInsert = toInsert;
+                final List<String> finalIdsToDelete = idsToDelete;
+                Runnable dbWriteAction = () -> {
+                    if (!finalIdsToDelete.isEmpty()) {
+                        dutyDao.deleteDutiesByIds(ownerUid, finalIdsToDelete);
+                    }
+                    if (!finalToInsert.isEmpty()) {
+                        dutyDao.insertOrReplaceAll(finalToInsert);
+                    }
+                };
+
+                if (database != null) {
+                    database.runInTransaction(dbWriteAction);
+                } else {
+                    dbWriteAction.run();
+                }
+
+                final BulkImportResult result = new BulkImportResult(finalToInsert.size(), created, updated, skipped);
                 if (callback != null) {
                     mainHandler.post(() -> callback.onComplete(result));
                 }
 
-                if (!toInsert.isEmpty()) {
+                // 5. Update pinned notification
+                if (context != null) {
+                    ShiftNotificationManager.updatePersistentNextDutyNotification(context);
+                }
+
+                // 6. Delete obsolete conflicting duplicates from Firestore
+                if (!finalIdsToDelete.isEmpty()) {
+                    addPendingDeletedDutyIds(ownerUid, finalIdsToDelete);
+                    firestoreService.deleteDutiesBatch(finalIdsToDelete, ownerUid, new FirestoreService.FirestoreCallback<Void>() {
+                        @Override
+                        public void onSuccess(Void unused) {
+                            removePendingDeletedDutyIds(ownerUid, finalIdsToDelete);
+                            Log.d(TAG, "Purged " + finalIdsToDelete.size() + " obsolete conflicting duties from Firestore");
+                        }
+
+                        @Override
+                        public void onError(Exception e) {
+                            Log.w(TAG, "Batch delete from Firestore queued: " + e.getMessage());
+                        }
+                    });
+                }
+
+                // 7. Batch upload new & updated duties to Firestore
+                if (!finalToInsert.isEmpty()) {
                     List<Duty> dutiesToUpload = new ArrayList<>();
-                    for (DutyEntity entity : toInsert) {
+                    for (DutyEntity entity : finalToInsert) {
                         dutiesToUpload.add(entity.toDomain());
                     }
                     firestoreService.uploadDutiesBatch(dutiesToUpload, new FirestoreService.FirestoreCallback<Void>() {
                         @Override
-                        public void onSuccess(Void res) {
+                        public void onSuccess(Void unused) {
                             diskExecutor.execute(() -> {
-                                for (DutyEntity entity : toInsert) {
+                                for (DutyEntity entity : finalToInsert) {
                                     entity.setSyncStatus(SyncStatus.SYNCED.name());
                                 }
-                                dutyDao.insertOrReplaceAll(toInsert);
+                                dutyDao.insertOrReplaceAll(finalToInsert);
                                 Log.d(TAG, "Imported " + result.totalImported + " duties synced to cloud");
                             });
                         }
@@ -348,6 +453,28 @@ public class DutyRepository {
 
     // --- Cloud Synchronization & Listeners ---
 
+    private synchronized Set<String> getPendingDeletedDutyIds(String ownerUid) {
+        if (context == null || ownerUid == null) return new HashSet<>();
+        SharedPreferences sp = context.getSharedPreferences("nxtshift_sync_deletes_" + ownerUid, Context.MODE_PRIVATE);
+        return new HashSet<>(sp.getStringSet("pending_deletes", Collections.emptySet()));
+    }
+
+    private synchronized void addPendingDeletedDutyIds(String ownerUid, List<String> ids) {
+        if (context == null || ownerUid == null || ids.isEmpty()) return;
+        SharedPreferences sp = context.getSharedPreferences("nxtshift_sync_deletes_" + ownerUid, Context.MODE_PRIVATE);
+        Set<String> set = new HashSet<>(sp.getStringSet("pending_deletes", Collections.emptySet()));
+        set.addAll(ids);
+        sp.edit().putStringSet("pending_deletes", set).apply();
+    }
+
+    private synchronized void removePendingDeletedDutyIds(String ownerUid, List<String> ids) {
+        if (context == null || ownerUid == null || ids.isEmpty()) return;
+        SharedPreferences sp = context.getSharedPreferences("nxtshift_sync_deletes_" + ownerUid, Context.MODE_PRIVATE);
+        Set<String> set = new HashSet<>(sp.getStringSet("pending_deletes", Collections.emptySet()));
+        set.removeAll(ids);
+        sp.edit().putStringSet("pending_deletes", set).apply();
+    }
+
     public void syncWithCloud(final String ownerUid, final RepositoryCallback<Boolean> callback) {
         if (ownerUid == null || ownerUid.isEmpty()) {
             if (callback != null) callback.onError(new IllegalArgumentException("No UID provided"));
@@ -355,7 +482,25 @@ public class DutyRepository {
         }
 
         diskExecutor.execute(() -> {
-            // 1. Upload pending changes first
+            // 1. Process pending deletions from Firestore first
+            Set<String> pendingDeletes = getPendingDeletedDutyIds(ownerUid);
+            if (!pendingDeletes.isEmpty()) {
+                List<String> toDeleteList = new ArrayList<>(pendingDeletes);
+                firestoreService.deleteDutiesBatch(toDeleteList, ownerUid, new FirestoreService.FirestoreCallback<Void>() {
+                    @Override
+                    public void onSuccess(Void unused) {
+                        removePendingDeletedDutyIds(ownerUid, toDeleteList);
+                        Log.d(TAG, "Successfully synced " + toDeleteList.size() + " pending deletions to Firestore");
+                    }
+
+                    @Override
+                    public void onError(Exception e) {
+                        Log.w(TAG, "Pending deletions deferred: " + e.getMessage());
+                    }
+                });
+            }
+
+            // 2. Upload pending local additions/updates
             List<DutyEntity> pending = dutyDao.getPendingUploadDuties(ownerUid);
             if (pending != null && !pending.isEmpty()) {
                 List<Duty> toUpload = new ArrayList<>();
@@ -380,25 +525,82 @@ public class DutyRepository {
                 });
             }
 
-            // 2. Fetch remote duties and merge into Room
+            // 3. Fetch remote duties and merge into Room
             firestoreService.fetchAllDuties(ownerUid, new FirestoreService.FirestoreCallback<List<Duty>>() {
                 @Override
                 public void onSuccess(List<Duty> remoteDuties) {
                     diskExecutor.execute(() -> {
-                        List<DutyEntity> entities = new ArrayList<>();
+                        Set<String> activeDeletes = getPendingDeletedDutyIds(ownerUid);
+                        List<DutyEntity> entitiesToSave = new ArrayList<>();
+                        List<String> obsoleteRemoteIds = new ArrayList<>();
+
+                        // Group remote duties by date to detect and eliminate duplicate roster duties in Firestore
+                        Map<String, List<Duty>> remoteByDate = new HashMap<>();
                         for (Duty remote : remoteDuties) {
-                            DutyEntity local = dutyDao.getDutyByIdDirect(ownerUid, remote.getId());
-                            // Conflict policy: If local has newer updated timestamp and is pending upload, preserve local
-                            if (local != null && local.getSyncStatus().equals(SyncStatus.PENDING_UPLOAD.name())
-                                    && local.getUpdatedAt() > remote.getUpdatedAt()) {
+                            if (activeDeletes.contains(remote.getId())) {
+                                obsoleteRemoteIds.add(remote.getId());
                                 continue;
                             }
-                            remote.setSyncStatus(SyncStatus.SYNCED);
-                            entities.add(DutyEntity.fromDomain(remote, ownerUid));
+                            remoteByDate.computeIfAbsent(remote.getDutyDate(), k -> new ArrayList<>()).add(remote);
                         }
-                        if (!entities.isEmpty()) {
-                            dutyDao.insertOrReplaceAll(entities);
+
+                        for (Map.Entry<String, List<Duty>> entry : remoteByDate.entrySet()) {
+                            List<Duty> onDate = entry.getValue();
+                            List<Duty> remoteRosterDuties = new ArrayList<>();
+                            List<Duty> remoteManualDuties = new ArrayList<>();
+
+                            for (Duty d : onDate) {
+                                if (d.isRosterGenerated()) {
+                                    remoteRosterDuties.add(d);
+                                } else {
+                                    remoteManualDuties.add(d);
+                                }
+                            }
+
+                            // If multiple roster duties exist on the same date in Firestore, keep only the latest
+                            Duty winningRosterDuty = null;
+                            if (!remoteRosterDuties.isEmpty()) {
+                                remoteRosterDuties.sort((a, b) -> Long.compare(b.getUpdatedAt(), a.getUpdatedAt()));
+                                winningRosterDuty = remoteRosterDuties.get(0);
+                                for (int i = 1; i < remoteRosterDuties.size(); i++) {
+                                    obsoleteRemoteIds.add(remoteRosterDuties.get(i).getId());
+                                }
+                            }
+
+                            if (winningRosterDuty != null) {
+                                DutyEntity local = dutyDao.getDutyByIdDirect(ownerUid, winningRosterDuty.getId());
+                                if (local != null && local.getSyncStatus().equals(SyncStatus.PENDING_UPLOAD.name())
+                                        && local.getUpdatedAt() > winningRosterDuty.getUpdatedAt()) {
+                                    // Local uncommitted change is newer; do not overwrite
+                                } else {
+                                    winningRosterDuty.setSyncStatus(SyncStatus.SYNCED);
+                                    entitiesToSave.add(DutyEntity.fromDomain(winningRosterDuty, ownerUid));
+                                }
+                            }
+
+                            for (Duty manual : remoteManualDuties) {
+                                DutyEntity local = dutyDao.getDutyByIdDirect(ownerUid, manual.getId());
+                                if (local != null && local.getSyncStatus().equals(SyncStatus.PENDING_UPLOAD.name())
+                                        && local.getUpdatedAt() > manual.getUpdatedAt()) {
+                                    continue;
+                                }
+                                manual.setSyncStatus(SyncStatus.SYNCED);
+                                entitiesToSave.add(DutyEntity.fromDomain(manual, ownerUid));
+                            }
                         }
+
+                        if (!entitiesToSave.isEmpty()) {
+                            dutyDao.insertOrReplaceAll(entitiesToSave);
+                        }
+
+                        if (!obsoleteRemoteIds.isEmpty()) {
+                            firestoreService.deleteDutiesBatch(obsoleteRemoteIds, ownerUid, null);
+                        }
+
+                        if (context != null) {
+                            ShiftNotificationManager.updatePersistentNextDutyNotification(context);
+                        }
+
                         if (callback != null) {
                             mainHandler.post(() -> callback.onComplete(true));
                         }
@@ -424,13 +626,44 @@ public class DutyRepository {
             @Override
             public void onSuccess(List<Duty> remoteDuties) {
                 diskExecutor.execute(() -> {
+                    Set<String> activeDeletes = getPendingDeletedDutyIds(ownerUid);
                     List<DutyEntity> entities = new ArrayList<>();
+                    Map<String, List<Duty>> remoteByDate = new HashMap<>();
+
                     for (Duty remote : remoteDuties) {
-                        remote.setSyncStatus(SyncStatus.SYNCED);
-                        entities.add(DutyEntity.fromDomain(remote, ownerUid));
+                        if (activeDeletes.contains(remote.getId())) {
+                            continue;
+                        }
+                        remoteByDate.computeIfAbsent(remote.getDutyDate(), k -> new ArrayList<>()).add(remote);
                     }
+
+                    for (List<Duty> onDate : remoteByDate.values()) {
+                        List<Duty> roster = new ArrayList<>();
+                        for (Duty d : onDate) {
+                            if (d.isRosterGenerated()) {
+                                roster.add(d);
+                            } else {
+                                d.setSyncStatus(SyncStatus.SYNCED);
+                                entities.add(DutyEntity.fromDomain(d, ownerUid));
+                            }
+                        }
+                        if (!roster.isEmpty()) {
+                            roster.sort((a, b) -> Long.compare(b.getUpdatedAt(), a.getUpdatedAt()));
+                            Duty winning = roster.get(0);
+                            DutyEntity local = dutyDao.getDutyByIdDirect(ownerUid, winning.getId());
+                            if (local == null || !local.getSyncStatus().equals(SyncStatus.PENDING_UPLOAD.name())
+                                    || local.getUpdatedAt() <= winning.getUpdatedAt()) {
+                                winning.setSyncStatus(SyncStatus.SYNCED);
+                                entities.add(DutyEntity.fromDomain(winning, ownerUid));
+                            }
+                        }
+                    }
+
                     if (!entities.isEmpty()) {
                         dutyDao.insertOrReplaceAll(entities);
+                    }
+                    if (context != null) {
+                        ShiftNotificationManager.updatePersistentNextDutyNotification(context);
                     }
                 });
             }
