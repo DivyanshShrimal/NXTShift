@@ -122,8 +122,8 @@
     <string name="pref_enable_reminder_summary">Receive a local notification about tomorrow\'s duty schedule</string>
     <string name="pref_reminder_time">Reminder time</string>
     <string name="pref_reminder_time_default">8:00 PM</string>
-    <string name="pref_persistent_notif">Ongoing next-duty notification</string>
-    <string name="pref_persistent_notif_summary">Show your current or upcoming shift in notification center</string>
+    <string name="pref_persistent_notif">Pin notification</string>
+    <string name="pref_persistent_notif_summary">Keep your current or next duty visible in the notification panel.</string>
     <string name="pref_lockscreen_privacy">Hide details on lock screen</string>
     <string name="pref_lockscreen_privacy_summary">Protect patient ward or colleague privacy when device is locked</string>
 
@@ -149,8 +149,8 @@
     <!-- Notification Strings -->
     <string name="notification_channel_name">Shift Reminders</string>
     <string name="notification_channel_desc">Daily alerts about upcoming duty schedules and ward assignments</string>
-    <string name="notification_persistent_channel_name">Ongoing Shift Status</string>
-    <string name="notification_persistent_channel_desc">Shows ongoing next shift details</string>
+    <string name="notification_persistent_channel_name">Pinned Duty Notification</string>
+    <string name="notification_persistent_channel_desc">Shows your current or next duty pinned in the notification panel.</string>
     <string name="notif_tomorrow_title">NXTShift — Tomorrow\'s Duty</string>
     <string name="notif_next_shift_title">NXTShift — Next Duty</string>
 

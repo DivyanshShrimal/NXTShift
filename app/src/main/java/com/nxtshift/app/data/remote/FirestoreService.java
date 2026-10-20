@@ -216,6 +216,32 @@ public class FirestoreService {
                 });
     }
 
+    public void deleteDutiesBatch(@NonNull List<String> dutyIds, @NonNull String uid, final FirestoreCallback<Void> callback) {
+        if (dutyIds.isEmpty()) {
+            if (callback != null) callback.onSuccess(null);
+            return;
+        }
+
+        if (uid.isEmpty()) {
+            if (callback != null) callback.onError(new IllegalStateException("Missing owner UID"));
+            return;
+        }
+
+        WriteBatch batch = db.batch();
+        for (String id : dutyIds) {
+            batch.delete(getDutiesCollection(uid).document(id));
+        }
+
+        batch.commit()
+                .addOnSuccessListener(aVoid -> {
+                    if (callback != null) callback.onSuccess(null);
+                })
+                .addOnFailureListener(e -> {
+                    Log.e(TAG, "Batch delete failed", e);
+                    if (callback != null) callback.onError(e);
+                });
+    }
+
     public void fetchAllDuties(@NonNull String uid, final FirestoreCallback<List<Duty>> callback) {
         getDutiesCollection(uid)
                 .get()

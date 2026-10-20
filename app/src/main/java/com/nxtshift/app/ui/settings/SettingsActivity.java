@@ -5,9 +5,13 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.NotificationManagerCompat;
+import androidx.core.content.ContextCompat;
 
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.nxtshift.app.R;
@@ -64,10 +68,20 @@ public class SettingsActivity extends AppCompatActivity {
         updateReminderTimeDisplay();
         binding.layoutReminderTime.setOnClickListener(v -> showReminderTimePicker());
 
-        // 4. Persistent Next Duty Notification Toggle
+        // 4. Pin Notification Toggle
         boolean persistentEnabled = prefs.getBoolean(ShiftNotificationManager.KEY_PERSISTENT_NOTIF, false);
         binding.switchPersistentNotif.setChecked(persistentEnabled);
         binding.switchPersistentNotif.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            if (isChecked) {
+                if (!NotificationManagerCompat.from(this).areNotificationsEnabled()) {
+                    Toast.makeText(this, "Notifications are disabled. Please enable them in system settings to use Pin notification.", Toast.LENGTH_LONG).show();
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS)
+                            != PackageManager.PERMISSION_GRANTED) {
+                        requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 101);
+                    }
+                }
+            }
             prefs.edit().putBoolean(ShiftNotificationManager.KEY_PERSISTENT_NOTIF, isChecked).apply();
             ShiftNotificationManager.updatePersistentNextDutyNotification(this);
         });
@@ -77,6 +91,7 @@ public class SettingsActivity extends AppCompatActivity {
         binding.switchLockscreenPrivacy.setChecked(lockscreenPrivacy);
         binding.switchLockscreenPrivacy.setOnCheckedChangeListener((buttonView, isChecked) -> {
             prefs.edit().putBoolean(ShiftNotificationManager.KEY_LOCKSCREEN_PRIVACY, isChecked).apply();
+            ShiftNotificationManager.updatePersistentNextDutyNotification(this);
         });
 
         // 6. Manual Sync

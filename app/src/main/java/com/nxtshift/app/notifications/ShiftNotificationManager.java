@@ -25,8 +25,17 @@ import com.nxtshift.app.receivers.AlarmReceiver;
 import com.nxtshift.app.ui.dashboard.DashboardActivity;
 import com.nxtshift.app.util.DateTimeUtils;
 
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Manages daily shift reminder scheduling and persistent next-duty notifications.
@@ -233,64 +242,268 @@ public class ShiftNotificationManager {
         NotificationManagerCompat.from(context).notify(NOTIFICATION_ID_TOMORROW, builder.build());
     }
 
+    public static class DutyTimeRange {
+        public final LocalDateTime start;
+        public final LocalDateTime end;
+
+        public DutyTimeRange(LocalDateTime start, LocalDateTime end) {
+            this.start = start;
+            this.end = end;
+        }
+    }
+
+    public static class PinnedDutyResolution {
+        public final Duty duty;
+        public final boolean isCurrentDuty;
+        public final String displayTitle;
+        public final String displayContent;
+        public final String bigText;
+
+        public PinnedDutyResolution(Duty duty, boolean isCurrentDuty, String displayTitle, String displayContent, String bigText) {
+            this.duty = duty;
+            this.isCurrentDuty = isCurrentDuty;
+            this.displayTitle = displayTitle;
+            this.displayContent = displayContent;
+            this.bigText = bigText;
+        }
+    }
+
+    public static DutyTimeRange parseDutyTimeRange(Duty duty) {
+        if (duty == null || duty.getDutyDate() == null) return null;
+        try {
+            LocalDate date = LocalDate.parse(duty.getDutyDate());
+            String startTimeStr = duty.getStartTime();
+            String endTimeStr = duty.getEndTime();
+            if (startTimeStr == null || startTimeStr.isEmpty()) {
+                startTimeStr = duty.getShiftType().getDefaultStartTime();
+            }
+            if (endTimeStr == null || endTimeStr.isEmpty()) {
+                endTimeStr = duty.getShiftType().getDefaultEndTime();
+            }
+            if (startTimeStr == null || startTimeStr.isEmpty() || endTimeStr == null || endTimeStr.isEmpty()) {
+                return null;
+            }
+
+            DateTimeFormatter timeFormatter = DateTimeFormatter.ofPattern("hh:mm a", Locale.US);
+            LocalTime start = LocalTime.parse(DateTimeUtils.normalizeTime12Hour(startTimeStr), timeFormatter);
+            LocalTime end = LocalTime.parse(DateTimeUtils.normalizeTime12Hour(endTimeStr), timeFormatter);
+
+            LocalDateTime dutyStart = LocalDateTime.of(date, start);
+            LocalDateTime dutyEnd;
+            if (duty.isOvernight() || end.isBefore(start)) {
+                dutyEnd = LocalDateTime.of(date.plusDays(1), end);
+            } else {
+                dutyEnd = LocalDateTime.of(date, end);
+            }
+            return new DutyTimeRange(dutyStart, dutyEnd);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    public static PinnedDutyResolution resolvePinnedDuty(List<Duty> duties, LocalDateTime now) {
+        if (duties == null || duties.isEmpty() || now == null) {
+            return null;
+        }
+
+        Duty activeDuty = null;
+        Duty nextUpcomingDuty = null;
+        LocalDateTime earliestUpcomingStart = null;
+
+        for (Duty duty : duties) {
+            if (duty.isOffOrLeave()) {
+                try {
+                    LocalDate dutyDate = LocalDate.parse(duty.getDutyDate());
+                    LocalDateTime offStart = dutyDate.atStartOfDay();
+                    LocalDateTime offEnd = dutyDate.plusDays(1).atStartOfDay();
+                    if (!now.isBefore(offStart) && now.isBefore(offEnd)) {
+                        if (activeDuty == null) {
+                            activeDuty = duty;
+                        }
+                    } else if (offStart.isAfter(now)) {
+                        if (earliestUpcomingStart == null || offStart.isBefore(earliestUpcomingStart)) {
+                            earliestUpcomingStart = offStart;
+                            nextUpcomingDuty = duty;
+                        }
+                    }
+                } catch (Exception ignored) {}
+                continue;
+            }
+
+            DutyTimeRange range = parseDutyTimeRange(duty);
+            if (range == null) continue;
+
+            if (!now.isBefore(range.start) && now.isBefore(range.end)) {
+                activeDuty = duty;
+                break; // Found active in-progress duty
+            } else if (range.start.isAfter(now)) {
+                if (earliestUpcomingStart == null || range.start.isBefore(earliestUpcomingStart)) {
+                    earliestUpcomingStart = range.start;
+                    nextUpcomingDuty = duty;
+                }
+            }
+        }
+
+        Duty target = (activeDuty != null) ? activeDuty : nextUpcomingDuty;
+        if (target == null) return null;
+
+        boolean isCurrent = (activeDuty != null);
+        String title;
+        String content;
+        StringBuilder big = new StringBuilder();
+
+        if (isCurrent) {
+            if (target.isOffOrLeave()) {
+                title = "Today: " + target.getShiftType().getDisplayName();
+                content = target.getShiftType().getDisplayName() + " — Rest and recharge!";
+                big.append(content);
+            } else {
+                title = "Current Duty: " + target.getShiftName();
+                content = target.getShiftName() + " · " + target.getFormattedDutyTime() + " (Ends " + target.getEndTime() + ")";
+                big.append(content);
+                if (target.getWardOrDepartment() != null && !target.getWardOrDepartment().isEmpty()) {
+                    big.append("\nWard: ").append(target.getWardOrDepartment());
+                }
+                if (target.getColleagues() != null && !target.getColleagues().isEmpty()) {
+                    big.append("\nWith: ").append(target.getColleagues());
+                }
+            }
+        } else {
+            if (target.isOffOrLeave()) {
+                title = "Next: " + target.getShiftType().getDisplayName();
+                content = DateTimeUtils.formatDisplayDate(target.getDutyDate()) + ": " + target.getShiftType().getDisplayName() + " — Rest and recharge";
+                big.append(content);
+            } else {
+                title = "Next Duty: " + target.getShiftName();
+                content = DateTimeUtils.formatDisplayDate(target.getDutyDate()) + ": " + target.getShiftName() + " (" + target.getFormattedDutyTime() + ")";
+                big.append(content);
+                if (target.getWardOrDepartment() != null && !target.getWardOrDepartment().isEmpty()) {
+                    big.append("\nWard: ").append(target.getWardOrDepartment());
+                }
+                if (target.getColleagues() != null && !target.getColleagues().isEmpty()) {
+                    big.append("\nWith: ").append(target.getColleagues());
+                }
+            }
+        }
+
+        return new PinnedDutyResolution(target, isCurrent, title, content, big.toString());
+    }
+
+    private static final ExecutorService NOTIF_EXECUTOR = Executors.newSingleThreadExecutor();
+
     /**
-     * Updates optional ongoing persistent next-duty notification.
+     * Updates ongoing pinned current/next-duty notification asynchronously in a background thread.
+     * Guarantees zero Room database access on the Android UI thread.
      */
     public static void updatePersistentNextDutyNotification(Context context) {
-        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        boolean persistentEnabled = prefs.getBoolean(KEY_PERSISTENT_NOTIF, false);
+        if (context == null) return;
+        final Context appContext = context.getApplicationContext();
+        NOTIF_EXECUTOR.execute(() -> {
+            try {
+                updatePersistentNextDutyNotificationInternal(appContext);
+            } catch (Exception e) {
+                Log.e(TAG, "Error updating pinned duty notification", e);
+            }
+        });
+    }
 
-        if (!persistentEnabled) {
-            NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID_PERSISTENT);
+    private static void updatePersistentNextDutyNotificationInternal(Context context) {
+        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        boolean pinEnabled = prefs.getBoolean(KEY_PERSISTENT_NOTIF, false);
+
+        if (!pinEnabled) {
+            cancelPinnedNotification(context);
             return;
         }
 
         FirebaseUser user = FirebaseAuth.getInstance().getCurrentUser();
         if (user == null) {
-            NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID_PERSISTENT);
+            cancelPinnedNotification(context);
             return;
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS)
                     != PackageManager.PERMISSION_GRANTED) {
+                Log.w(TAG, "POST_NOTIFICATIONS permission not granted");
                 return;
             }
         }
 
-        String today = DateTimeUtils.getTodayIsoDate();
-        NXTShiftDatabase db = NXTShiftDatabase.getInstance(context);
-        List<com.nxtshift.app.data.local.DutyEntity> upcoming = db.dutyDao().getUpcomingDutiesDirect(user.getUid(), today, 1);
+        createNotificationChannels(context);
 
-        if (upcoming == null || upcoming.isEmpty()) {
-            NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID_PERSISTENT);
+        NotificationManagerCompat nmCompat = NotificationManagerCompat.from(context);
+        if (!nmCompat.areNotificationsEnabled()) {
+            Log.w(TAG, "Notifications are disabled at the system level");
             return;
         }
 
-        Duty next = upcoming.get(0).toDomain();
-        String title = context.getString(R.string.notif_next_shift_title);
-        String details = DateTimeUtils.formatDisplayDate(next.getDutyDate()) + ": "
-                + next.getShiftName() + " (" + next.getFormattedDutyTime() + ")";
+        LocalDate today = LocalDate.now();
+        String yesterdayIso = today.minusDays(1).format(DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.US));
+        String futureIso = today.plusDays(7).format(DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.US));
+
+        NXTShiftDatabase db = NXTShiftDatabase.getInstance(context);
+        List<com.nxtshift.app.data.local.DutyEntity> rawDuties = db.dutyDao().getDutiesBetweenDatesDirect(user.getUid(), yesterdayIso, futureIso);
+
+        List<Duty> domainDuties = new ArrayList<>();
+        if (rawDuties != null) {
+            for (com.nxtshift.app.data.local.DutyEntity e : rawDuties) {
+                domainDuties.add(e.toDomain());
+            }
+        }
+
+        PinnedDutyResolution res = resolvePinnedDuty(domainDuties, LocalDateTime.now());
+        if (res == null) {
+            cancelPinnedNotification(context);
+            return;
+        }
+
+        boolean hideOnLockscreen = prefs.getBoolean(KEY_LOCKSCREEN_PRIVACY, false);
 
         Intent tapIntent = new Intent(context, DashboardActivity.class);
-        PendingIntent pi = PendingIntent.getActivity(context, 1, tapIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent pi = PendingIntent.getActivity(
+                context,
+                1,
+                tapIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, CHANNEL_PERSISTENT_ID)
                 .setSmallIcon(R.drawable.ic_launcher_foreground)
-                .setContentTitle(title)
-                .setContentText(details)
+                .setContentTitle(res.displayTitle)
+                .setContentText(res.displayContent)
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(res.bigText))
                 .setOngoing(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setAutoCancel(false)
                 .setContentIntent(pi);
 
-        NotificationManagerCompat.from(context).notify(NOTIFICATION_ID_PERSISTENT, builder.build());
+        if (hideOnLockscreen) {
+            builder.setVisibility(NotificationCompat.VISIBILITY_PRIVATE);
+            NotificationCompat.Builder publicBuilder = new NotificationCompat.Builder(context, CHANNEL_PERSISTENT_ID)
+                    .setSmallIcon(R.drawable.ic_launcher_foreground)
+                    .setContentTitle(res.isCurrentDuty ? "Current Duty" : "Next Duty")
+                    .setContentText("Duty scheduled (details hidden on lock screen)")
+                    .setOngoing(true)
+                    .setContentIntent(pi);
+            builder.setPublicVersion(publicBuilder.build());
+        } else {
+            builder.setVisibility(NotificationCompat.VISIBILITY_PUBLIC);
+        }
+
+        nmCompat.notify(NOTIFICATION_ID_PERSISTENT, builder.build());
+    }
+
+    public static void cancelPinnedNotification(Context context) {
+        if (context == null) return;
+        NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID_PERSISTENT);
     }
 
     public static void cancelAllNotifications(Context context) {
+        if (context == null) return;
+        cancelPinnedNotification(context);
         NotificationManagerCompat nm = NotificationManagerCompat.from(context);
         nm.cancel(NOTIFICATION_ID_TOMORROW);
-        nm.cancel(NOTIFICATION_ID_PERSISTENT);
         cancelDailyDutyReminder(context);
     }
 }

@@ -37,6 +37,9 @@ public class NXTShiftApplication extends Application {
 
         // Setup notification channels (Android 8.0+)
         ShiftNotificationManager.createNotificationChannels(this);
+
+        // Restore or refresh pinned duty notification if enabled
+        ShiftNotificationManager.updatePersistentNextDutyNotification(this);
     }
 
     public static NXTShiftApplication getInstance() {
